@@ -8,8 +8,10 @@ mv2_frames
 *mkv
 *m4a
 *wasm
+*webm
 *raw
 uv.lock
 debug_frames_DM
 mv2_frames
 .venv
+
