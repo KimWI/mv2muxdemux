@@ -152,8 +152,10 @@
         async function demuxMV2(arrayBuffer) {
             const data = new Uint8Array(arrayBuffer);
             const blockSize = 16384;
-            let remainingBytes = data.length - 512;
-            let numBlocks = remainingBytes >= 15872 ? 1 + Math.floor((remainingBytes - 15872) / 16384) : 0;
+            /* let remainingBytes = data.length - 512; */
+            /* let numBlocks = remainingBytes >= 15872 ? 1 + Math.floor((remainingBytes - 15872) / 16384) : 0; */
+            let remainingBytes = data.length - 16384;
+            let numBlocks = 1 + Math.floor(remainingBytes - / 16384);
 
             const videoBuffer = new Uint8Array(numBlocks * 256 * 192 * 3);
             let videoOffset = 0;
