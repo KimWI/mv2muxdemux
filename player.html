@@ -267,6 +267,7 @@ class MSXMediaDemuxer {
         }
         this.ctx.putImageData(imgData, 0, 0);
     }
+
     // ==========================================================
     // 💡 MSX2 VDP RGB333 팔레트 추출 코어
     // ==========================================================
@@ -286,40 +287,6 @@ class MSXMediaDemuxer {
         }
         while (pal.length < colorCount) pal.push([0, 0, 0]);
         return pal;
-    }
-
-    // ==========================================================
-    // 💡 캔버스 렌더링 (SCREEN 2)
-    // ==========================================================
-    renderFrame(frameIndex) {
-        if (frameIndex >= this.totalFrames) return;
-        const frame = this.frames[frameIndex];
-        const imgData = this.ctx.createImageData(256, 192);
-        const data = imgData.data;
-
-        for (let y = 0; y < 192; y++) {
-            for (let cx = 0; cx < 32; cx++) {
-                const off = (Math.floor(y / 8) * 32 + cx) * 8 + (y % 8);
-                const p_byte = frame.pgt[off];
-                const c_byte = frame.ct[off];
-                
-                const fg = (c_byte >> 4) & 0x0F;
-                const bg = c_byte & 0x0F;
-
-                const x_start = cx * 8;
-                for (let p = 0; p < 8; p++) {
-                    const colorIdx = (p_byte & (1 << (7 - p))) !== 0 ? fg : bg;
-                    const rgb = frame.palette[colorIdx] || [0, 0, 0];
-                    
-                    const pxOffset = (y * 256 + (x_start + p)) * 4;
-                    data[pxOffset] = rgb[0];
-                    data[pxOffset + 1] = rgb[1];
-                    data[pxOffset + 2] = rgb[2];
-                    data[pxOffset + 3] = 255;
-                }
-            }
-        }
-        this.ctx.putImageData(imgData, 0, 0);
     }
 
     // ==========================================================
