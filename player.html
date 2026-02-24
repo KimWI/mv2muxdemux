@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>MSX2 MV1/MV2 Universal Web Player</title>
+    <style>
+        body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 50px; }
+        /* 💡 핵심: 캔버스를 강제로 늘려도 도트(픽셀)가 뭉개지지 않고 칼같이 유지되도록 하는 CSS */
+        #msx-screen {
+            width: 768px; /* 256 * 3 */
+            height: 576px; /* 192 * 3 */
+            image-rendering: pixelated;
+            border: 4px solid #333;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            background-color: #000;
+        }
+        .controls { margin-top: 20px; }
+        button, input { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #333; color: white; border: 1px solid #555; }
+        button:hover { background: #555; }
+        button:disabled { background: #222; color: #666; cursor: not-allowed; }
+        #status { margin-top: 15px; font-weight: bold; color: #4CAF50; }
+    </style>
+</head>
+<body>
+
+    <h2>MSX2 Universal Player (SCREEN 2)</h2>
+    <canvas id="msx-screen" width="256" height="192"></canvas>
+    
+    <div class="controls">
+        <input type="file" id="file-input" accept=".mv1,.mv2" />
+        <button id="btn-play" disabled>▶ Play</button>
+        <button id="btn-pause" disabled>⏸ Pause</button>
+    </div>
+    <div id="status">대기 중... MV1 또는 MV2 파일을 선택하세요.</div>
+
+<script>
+class MSXMediaDemuxer {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        this.frames = [];
+        this.audioSource = null;
+        this.isPlaying = false;
+        this.startTime = 0;
+        this.pauseTime = 0;
+        this.animationId = null;
+        
+        // 메타데이터
+        this.format = null; // 'MV1' or 'MV2'
+        this.fps = 0;
+        this.totalFrames = 0;
+    }
+
+    async loadFile(file) {
+        document.getElementById('status').innerText = "파일 분석 중...";
+        const arrayBuffer = await file.arrayBuffer();
+        const data = new Uint8Array(arrayBuffer);
+        
+        // 1. 헤더 시그니처 판별
+        const sig = new TextDecoder().decode(data.slice(0, 8));
+        
+        if (sig.startsWith("MMCSD_MV")) {
+            this.format = "MV1";
+            this.fps = 12;
+            await this.parseMV1(data);
+        } else if (sig.startsWith("MV2 ")) {
+            this.format = "MV2";
+            this.fps = 15;
+            await this.parseMV2(data);
+        } else {
+            throw new Error("지원하지 않는 파일 포맷입니다.");
+        }
+        
+        document.getElementById('status').innerText = `[${this.format}] 파싱 완료! (${this.fps} FPS, ${this.totalFrames} 프레임)`;
+        document.getElementById('btn-play').disabled = false;
+    }
+
+    // ==========================================================
+    // 💡 [Format 1] MV1 파서 (12fps, PCM Audio, 16KB Header)
+    // ==========================================================
+    async parseMV1(data) {
+        this.frames = [];
+        let offset = 16384; // 첫 16KB는 통째로 글로벌 헤더
+        let pcmChunks = [];
+
+        while (offset + 16384 <= data.length) {
+            const pgt = data.slice(offset, offset + 6144);
+            const ct = data.slice(offset + 6144, offset + 12288);
+            const pcm = data.slice(offset + 12288, offset + 13232); // 944 bytes
+            const palRaw = data.slice(offset + 13232, offset + 13264); // 32 bytes
+            
+            const palette = this.extractPalette(palRaw, 16);
+            this.frames.push({ pgt, ct, palette });
+            pcmChunks.push(pcm);
+            
+            offset += 16384;
+        }
+        
+        this.totalFrames = this.frames.length;
+
+        // 8-bit Unsigned PCM (11328Hz) -> Web Audio API Float32 변환
+        const sampleRate = 944 * 12; // 11328 Hz
+        const audioBuffer = this.audioCtx.createBuffer(1, this.totalFrames * 944, sampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+        
+        let writeOffset = 0;
+        for (let i = 0; i < pcmChunks.length; i++) {
+            for (let j = 0; j < 944; j++) {
+                // 0~255를 -1.0 ~ 1.0으로 정규화
+                channelData[writeOffset++] = (pcmChunks[i][j] - 128) / 128.0;
+            }
+        }
+        this.audioBuffer = audioBuffer;
+    }
+
+    // ==========================================================
+    // 💡 [Format 2] MV2 파서 (15fps, MP3 Audio, 512B Header)
+    // ==========================================================
+    async parseMV2(data) {
+        this.frames = [];
+        let offset = 512; // 첫 512바이트만 글로벌 헤더
+        let mp3Chunks = [];
+        let isFirstFrame = true;
+
+        while (offset < data.length) {
+            const blockSize = isFirstFrame ? 15872 : 16384;
+            if (offset + blockSize > data.length) break;
+
+            const pgt = data.slice(offset, offset + 6144);
+            const ct = data.slice(offset + 6144, offset + 12288);
+            const palRaw = data.slice(offset + 12288, offset + 12318); // 30 bytes
+            
+            const sz = data[offset + 12800]; // MP3 청크 사이즈 인디케이터
+            const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
+            
+            const palette = this.extractPalette(palRaw, 15);
+            this.frames.push({ pgt, ct, palette });
+            mp3Chunks.push(mp3Data);
+
+            offset += blockSize;
+            isFirstFrame = false;
+        }
+
+        this.totalFrames = this.frames.length;
+
+        // 조각난 MP3 바이너리를 하나로 합쳐서 브라우저 네이티브 디코더에 위임
+        const totalMp3Length = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        const mp3Concat = new Uint8Array(totalMp3Length);
+        let writeOffset = 0;
+        for (let chunk of mp3Chunks) {
+            mp3Concat.set(chunk, writeOffset);
+            writeOffset += chunk.length;
+        }
+
+        // Web Audio API 비동기 하드웨어 MP3 디코딩
+        this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
+    }
+
+    // MSX2 RGB333 (2Bytes) -> RGB888 (배열) 변환
+    extractPalette(palData, colorCount) {
+        const pal = [[0,0,0]]; // Color 0은 투명/검정
+        for (let i = 0; i < colorCount; i++) {
+            const r_b = palData[i * 2];     // 0번 바이트: [R(4) | B(4)]
+            const g = palData[i * 2 + 1];   // 1번 바이트: [0000 | G(4)]
+            
+            const r8 = ((r_b >> 4) & 0x0F) * 255 / 7;
+            const b8 = (r_b & 0x0F) * 255 / 7;
+            const g8 = (g & 0x0F) * 255 / 7;
+            
+            pal.push([r8, g8, b8]);
+        }
+        return pal;
+    }
+
+    // ==========================================================
+    // 💡 화면 렌더러 (SCREEN 2 비트 연산)
+    // ==========================================================
+    renderFrame(frameIndex) {
+        if (frameIndex >= this.totalFrames) return;
+        const frame = this.frames[frameIndex];
+        const imgData = this.ctx.createImageData(256, 192);
+        const data = imgData.data;
+
+        for (let y = 0; y < 192; y++) {
+            for (let cx = 0; cx < 32; cx++) {
+                const off = (Math.floor(y / 8) * 32 + cx) * 8 + (y % 8);
+                const p_byte = frame.pgt[off];
+                const c_byte = frame.ct[off];
+                
+                const fg = (c_byte >> 4) & 0x0F;
+                const bg = c_byte & 0x0F;
+
+                const x_start = cx * 8;
+                for (let p = 0; p < 8; p++) {
+                    const colorIdx = (p_byte & (1 << (7 - p))) !== 0 ? fg : bg;
+                    const rgb = frame.palette[colorIdx] || [0, 0, 0];
+                    
+                    const pxOffset = (y * 256 + (x_start + p)) * 4;
+                    data[pxOffset] = rgb[0];     // R
+                    data[pxOffset + 1] = rgb[1]; // G
+                    data[pxOffset + 2] = rgb[2]; // B
+                    data[pxOffset + 3] = 255;    // Alpha
+                }
+            }
+        }
+        this.ctx.putImageData(imgData, 0, 0);
+    }
+
+    // ==========================================================
+    // 💡 오디오를 마스터 클럭으로 사용하는 재생 제어 (A/V Sync)
+    // ==========================================================
+    play() {
+        if (this.isPlaying) return;
+        
+        if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+
+        this.audioSource = this.audioCtx.createBufferSource();
+        this.audioSource.buffer = this.audioBuffer;
+        this.audioSource.connect(this.audioCtx.destination);
+        
+        // 일시정지했던 지점부터 다시 시작
+        this.audioSource.start(0, this.pauseTime);
+        this.startTime = this.audioCtx.currentTime - this.pauseTime;
+        this.isPlaying = true;
+
+        document.getElementById('btn-play').disabled = true;
+        document.getElementById('btn-pause').disabled = false;
+
+        const loop = () => {
+            if (!this.isPlaying) return;
+            
+            // 핵심: 현재 재생 중인 오디오 시간을 기준으로 프레임 계산 (싱크 완벽 보장)
+            const currentTime = this.audioCtx.currentTime - this.startTime;
+            const currentFrame = Math.floor(currentTime * this.fps);
+            
+            if (currentFrame < this.totalFrames) {
+                this.renderFrame(currentFrame);
+                this.animationId = requestAnimationFrame(loop);
+            } else {
+                this.pause(); // 끝까지 재생됨
+            }
+        };
+        loop();
+    }
+
+    pause() {
+        if (!this.isPlaying) return;
+        this.isPlaying = false;
+        
+        this.audioSource.stop();
+        this.pauseTime = this.audioCtx.currentTime - this.startTime;
+        cancelAnimationFrame(this.animationId);
+
+        document.getElementById('btn-play').disabled = false;
+        document.getElementById('btn-pause').disabled = true;
+    }
+}
+
+// UI 이벤트 바인딩
+const player = new MSXMediaDemuxer('msx-screen');
+
+document.getElementById('file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+        await player.loadFile(file);
+    } catch (err) {
+        document.getElementById('status').innerText = `에러: ${err.message}`;
+        console.error(err);
+    }
+});
+
+document.getElementById('btn-play').addEventListener('click', () => player.play());
+document.getElementById('btn-pause').addEventListener('click', () => player.pause());
+
+</script>
+</body>
+</html>
