@@ -274,32 +274,35 @@ class MV2PerfectFrameEncoder:
                     after_bgr = cv2.cvtColor(after_rgb, cv2.COLOR_RGB2BGR)
                     cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_after.png"), after_bgr)
 
+
+
                 # ==========================================================
-                # 💡 [핵심 수정 2] Color 0번(투명/검정)을 포함한 32바이트 팔레트 정렬
+                # 💡 [원상 복구 1] 0번 색상 강제 주입 꼼수 폐기 -> 순수 15색 30바이트
                 # ==========================================================
-                pal_b = bytearray([0, 0]) # MSX Color 0 (Background) 강제 할당
+                pal_b = bytearray() # 기존의 bytearray([0, 0]) 삭제!
                 for r, g, b in pal_333: 
                     pal_b.extend([(r<<4)|b, g])
                     
-                # 혹시 모를 오버플로우/언더플로우 방지 (정확히 32바이트 고정)
-                if len(pal_b) < 32: pal_b.extend(b'\x00' * (32 - len(pal_b)))
-                elif len(pal_b) > 32: pal_b = pal_b[:32]
+                # 혹시 모를 길이 오류 방지 (정확히 30바이트 고정)
+                if len(pal_b) < 30: pal_b.extend(b'\x00' * (30 - len(pal_b)))
+                elif len(pal_b) > 30: pal_b = pal_b[:30]
 
                 # ==========================================================
-                # 💡 [핵심 수정 3] 모든 프레임을 예외 없이 16,384 바이트로 고정
+                # 💡 [원상 복구 2] 32바이트 할당(12320) -> 공식 규격인 30바이트 할당(12318)
                 # ==========================================================
                 block = bytearray(b'\x55' * 16384) 
                 block[0:6144] = pgt.tobytes()
                 block[6144:12288] = ct.tobytes()
-                block[12288:12320] = pal_b # 정확히 32바이트 할당 (오프셋 밀림 원천 차단)
+                block[12288:12318] = pal_b # 정확히 15색 (30바이트)
                 
+                # 오디오 청크 및 나머지 처리 (동일)
                 target_a = int((idx + 1) * (bps / 15))
                 sz = max(1, min(111, math.ceil((target_a - mp3_off) / 32))) 
                 block[12800] = sz
                 chunk = mp3_data[mp3_off : mp3_off + sz*32]
                 block[12801 : 12801+len(chunk)] = chunk
                 mp3_off += len(chunk)
-                
+
                 out_f.write(block)
                 if idx % 10 == 0: sys.stdout.write(f"\r  > {idx} 프레임 정밀 최적화 인코딩 중..."); sys.stdout.flush()
                 idx += 1

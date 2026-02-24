@@ -1,11 +1,11 @@
-<!DOCTYPE html>
+e!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
     <title>MSX2 MV1/MV2 Universal Web Player (Perfect Edition)</title>
     <style>
         body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 50px; }
-        /* 💡 캔버스 해상도 업스케일링 시 도트 뭉개짐 방지 (레트로 픽셀아트 필수 CSS) */
+        /* 💡 캔버스 해상도 업스케일링 시 도트 뭉개짐 방지 */
         #msx-screen {
             width: 768px; /* 256 * 3 */
             height: 576px; /* 192 * 3 */
@@ -24,7 +24,7 @@
 </head>
 <body>
 
-<h2>MSX2 Universal Player (SCREEN 2)</h2>
+    <h2>MSX2 Universal Player (SCREEN 2)</h2>
     <canvas id="msx-screen" width="256" height="192"></canvas>
     
     <div class="controls">
@@ -32,18 +32,9 @@
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
     </div>
-    
-    <div style="margin-top: 15px; background: #222; padding: 10px; display: inline-block; border-radius: 8px;">
-        <label style="margin-right: 15px; cursor: pointer;">
-            <input type="checkbox" id="toggle-rgb"> 🔴🔵 RGB ↔ BGR 보정 (색상 스왑)
-        </label>
-        <label style="cursor: pointer;">
-            <input type="checkbox" id="toggle-fgbg"> 🌗 FG ↔ BG 보정 (음영 반전)
-        </label>
-    </div>
-    
     <div id="status">대기 중... MV1 또는 MV2 파일을 선택하세요.</div>
     <div id="debug-info"></div>
+
 <script>
 class MSXMediaDemuxer {
     constructor(canvasId) {
@@ -62,10 +53,10 @@ class MSXMediaDemuxer {
         this.totalFrames = 0;
     }
 
-    // ==========================================================
-    // 💡 1. 파일 헤더 엄격 판별 (Official 16KB vs Legacy 512B)
-    // ==========================================================
     async loadFile(file) {
+	// 💡 [추가됨] 새로운 파일을 읽기 전에 모든 상태를 맨 처음으로 되돌림
+        this.reset();
+
         document.getElementById('status').innerText = "파일 분석 중...";
         const arrayBuffer = await file.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
@@ -91,9 +82,9 @@ class MSXMediaDemuxer {
                 }
             } 
             else if (sigText.startsWith("MV2")) {
-                this.format = "MV2 (Legacy Custom)";
+                this.format = "MV2 (Custom 512B)";
                 this.fps = 15;
-                await this.parseMV2(data, 512); // 과거에 만든 512B 헤더 파일 대응
+                await this.parseMV2(data, 512); 
             } 
             else {
                 throw new Error(`지원하지 않는 포맷입니다. (Sig: ${sigText})`);
@@ -108,9 +99,6 @@ class MSXMediaDemuxer {
         }
     }
 
-    // ==========================================================
-    // 💡 2. MV1 파서 (12fps, PCM Audio, 16KB Header)
-    // ==========================================================
     async parseMV1(data) {
         this.frames = [];
         let offset = 16384; 
@@ -122,6 +110,7 @@ class MSXMediaDemuxer {
             const pcm = data.slice(offset + 12288, offset + 13232);
             const palRaw = data.slice(offset + 13232, offset + 13264);
             
+            // MV1은 010 템플릿 기준 정확히 32바이트(16색)를 사용함
             const palette = this.extractPalette(palRaw, 16);
             this.frames.push({ pgt, ct, palette });
             pcmChunks.push(pcm);
@@ -130,7 +119,7 @@ class MSXMediaDemuxer {
         }
         this.totalFrames = this.frames.length;
 
-        const sampleRate = 944 * 12; // 11.3KHz
+        const sampleRate = 944 * 12; 
         const audioBuffer = this.audioCtx.createBuffer(1, this.totalFrames * 944, sampleRate);
         const channelData = audioBuffer.getChannelData(0);
         
@@ -143,16 +132,12 @@ class MSXMediaDemuxer {
         this.audioBuffer = audioBuffer;
     }
 
-    // ==========================================================
-    // 💡 3. MV2 파서 (15fps, MP3 Audio, 동적 헤더 및 팔레트 교정)
-    // ==========================================================
     async parseMV2(data, headerSize) {
         this.frames = [];
         let offset = headerSize; 
         let mp3Chunks = [];
         
-        const isLegacy = (headerSize === 512);
-        let isFirstFrame = isLegacy;
+        let isFirstFrame = (headerSize === 512);
 
         while (offset < data.length) {
             const blockSize = isFirstFrame ? 15872 : 16384;
@@ -161,16 +146,9 @@ class MSXMediaDemuxer {
             const pgt = data.slice(offset, offset + 6144);
             const ct = data.slice(offset + 6144, offset + 12288);
             
-            let palette;
-            // 💡 핵심: 레거시 파일(30바이트)의 컬러 밀림 현상 자동 교정 로직
-            if (isLegacy) {
-                const palRaw = data.slice(offset + 12288, offset + 12318);
-                // 0번 팔레트(투명/검정)를 맨 앞에 강제로 주입하여 1칸 밀림을 상쇄
-                palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
-            } else {
-                const palRaw = data.slice(offset + 12288, offset + 12320);
-                palette = this.extractPalette(palRaw, 16);
-            }
+            // 💡 [핵심 버그 수정] MV2는 무조건 30바이트(15색)만 추출하고 0번 색상을 강제 주입하여 밀림(Inversion) 차단!
+            const palRaw = data.slice(offset + 12288, offset + 12318);
+            const palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
             
             const sz = data[offset + 12800];
             const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
@@ -194,26 +172,50 @@ class MSXMediaDemuxer {
     }
 
     // ==========================================================
-    // 💡 MSX2 VDP RGB333 팔레트 추출 코어 (BGR 스왑 토글 적용)
+    // 💡 재생 상태, 버퍼, 캔버스를 초기화하는 리셋 엔진
+    // ==========================================================
+    reset() {
+        // 1. 현재 재생 중인 루프 정지
+        this.isPlaying = false;
+        cancelAnimationFrame(this.animationId);
+
+        // 2. 오디오 하드웨어 노드 연결 해제 및 파괴
+        if (this.audioSource) {
+            try { this.audioSource.stop(); } catch (e) {} // 아직 시작 안 한 경우 예외 처리
+            this.audioSource.disconnect();
+            this.audioSource = null;
+        }
+
+        // 3. 내부 버퍼 및 타임라인 초기화
+        this.frames = [];
+        this.audioBuffer = null;
+        this.totalFrames = 0;
+        this.startTime = 0;
+        this.pauseTime = 0;
+
+        // 4. 캔버스를 검은색으로 완전히 밀어버림 (시각적 리셋 효과)
+        this.ctx.fillStyle = "black";
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // 5. UI 버튼 초기화
+        document.getElementById('btn-play').disabled = true;
+        document.getElementById('btn-pause').disabled = true;
+    }
+    // ==========================================================
+    // 💡 MSX2 VDP RGB333 팔레트 정밀 추출
     // ==========================================================
     extractPalette(palData, colorCount) {
         const pal = [];
-        const isBgrSwap = document.getElementById('toggle-rgb').checked;
-
         for (let i = 0; i < colorCount; i++) {
             if (i * 2 + 1 >= palData.length) break;
             
             const r_b = palData[i * 2];     
             const g = palData[i * 2 + 1];   
             
-            let r8 = ((r_b >> 4) & 0x0F) * 255 / 7;
-            let b8 = (r_b & 0x0F) * 255 / 7;
-            let g8 = (g & 0x0F) * 255 / 7;
-            
-            // 💡 디버그: BGR 데이터가 그대로 들어온 경우 R과 B를 강제로 바꿈
-            if (isBgrSwap) {
-                const temp = r8; r8 = b8; b8 = temp;
-            }
+            // 💡 0x0F가 아닌 0x07 마스킹으로 MSX 하드웨어(3비트) 스펙 완벽 준수
+            const r8 = Math.round(((r_b >> 4) & 0x07) * 255 / 7);
+            const b8 = Math.round((r_b & 0x07) * 255 / 7);
+            const g8 = Math.round((g & 0x07) * 255 / 7);
             
             pal.push([r8, g8, b8]);
         }
@@ -221,16 +223,11 @@ class MSXMediaDemuxer {
         return pal;
     }
 
-    // ==========================================================
-    // 💡 캔버스 렌더링 (FG/BG 네거티브 스왑 토글 적용)
-    // ==========================================================
     renderFrame(frameIndex) {
         if (frameIndex >= this.totalFrames) return;
         const frame = this.frames[frameIndex];
         const imgData = this.ctx.createImageData(256, 192);
         const data = imgData.data;
-        
-        const isNegativeSwap = document.getElementById('toggle-fgbg').checked;
 
         for (let y = 0; y < 192; y++) {
             for (let cx = 0; cx < 32; cx++) {
@@ -238,23 +235,12 @@ class MSXMediaDemuxer {
                 const p_byte = frame.pgt[off];
                 const c_byte = frame.ct[off];
                 
-                let fg = (c_byte >> 4) & 0x0F;
-                let bg = c_byte & 0x0F;
-                
-                // 💡 디버그: 전경색과 배경색 맵핑이 반대로 된 음화 현상 강제 복구
-                if (isNegativeSwap) {
-                    const temp = fg; fg = bg; bg = temp;
-                }
+                const fg = (c_byte >> 4) & 0x0F;
+                const bg = c_byte & 0x0F;
 
                 const x_start = cx * 8;
                 for (let p = 0; p < 8; p++) {
                     const colorIdx = (p_byte & (1 << (7 - p))) !== 0 ? fg : bg;
-                    
-                    // 팔레트를 실시간으로 다시 계산하여 토글 즉시 반응하도록 함
-                    const currentPalette = this.extractPalette(frame.paletteRaw || this.frames[0].paletteRaw, 16);
-                    // (최적화를 위해 loadFile에서 추출한 원본 palRaw를 사용하려면 약간의 구조 수정이 필요하지만, 여기서는 디버깅을 위해 프레임에 저장된 이미 렌더링된 팔레트를 덮어씌웁니다.)
-                    // * 빠른 디버깅을 위해 추출된 palette 배열을 사용합니다. BGR 토글 시 파일을 다시 로드해야 반영됩니다.
-                    
                     const rgb = frame.palette[colorIdx] || [0, 0, 0];
                     
                     const pxOffset = (y * 256 + (x_start + p)) * 4;
@@ -268,10 +254,6 @@ class MSXMediaDemuxer {
         this.ctx.putImageData(imgData, 0, 0);
     }
 
-
-    // ==========================================================
-    // 💡 A/V Sync 재생 제어
-    // ==========================================================
     play() {
         if (this.isPlaying) return;
         if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
@@ -302,18 +284,22 @@ class MSXMediaDemuxer {
         };
         loop();
     }
-
     pause() {
         if (!this.isPlaying) return;
         this.isPlaying = false;
         
-        this.audioSource.stop();
+        // 💡 [수정됨] audioSource가 존재할 때만 stop 명령 하달
+        if (this.audioSource) {
+            this.audioSource.stop();
+        }
+        
         this.pauseTime = this.audioCtx.currentTime - this.startTime;
         cancelAnimationFrame(this.animationId);
 
         document.getElementById('btn-play').disabled = false;
         document.getElementById('btn-pause').disabled = true;
     }
+
 }
 
 // UI 이벤트 바인딩
