@@ -52,41 +52,90 @@ class MSXMediaDemuxer {
         this.totalFrames = 0;
     }
 
-
     async loadFile(file) {
         document.getElementById('status').innerText = "파일 분석 중...";
         const arrayBuffer = await file.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
         
-        // 💡 디버깅을 위해 맨 앞 8바이트를 Hex 문자열로 추출
-        const hexDump = Array.from(data.slice(0, 8))
-                             .map(b => b.toString(16).padStart(2, '0').toUpperCase())
-                             .join(' ');
-        console.log("[*] File Header Hex:", hexDump);
-
-        // 💡 TextDecoder 대신 String.fromCharCode를 사용하여 Null 바이트 간섭 최소화
+        // 1. 헤더 시그니처 및 버전 문자열 추출 (엄격한 바이트 매칭)
         const sigText = String.fromCharCode(...data.slice(0, 8));
+        const versionText = String.fromCharCode(...data.slice(16, 21));
 
-        // 1. 헤더 시그니처 판별 (MV1)
-        if (sigText.startsWith("MMCSD_MV")) {
-            this.format = "MV1";
-            this.fps = 12;
-            await this.parseMV1(data);
+        console.log(`[*] 파일 로드 됨 - Signature: [${sigText}], Version: [${versionText}]`);
+
+        // 2. 'MMCSD_MV' 시그니처 (공식 MV1 또는 공식 MV2)
+        if (sigText === "MMCSD_MV") {
+            if (versionText === "v1.00") {
+                this.format = "MV1 (Official)";
+                this.fps = 12;
+                await this.parseMV1(data);
+            } else if (versionText === "v2.00") {
+                // 💡 핵심: 업로드하신 공식 MV2는 헤더가 16KB(16384)입니다.
+                this.format = "MV2 (Official)";
+                this.fps = 15;
+                await this.parseMV2(data, 16384); 
+            } else {
+                throw new Error(`알 수 없는 공식 버전입니다: ${versionText}`);
+            }
         } 
-        // 2. 헤더 시그니처 판별 (MV2) - 공백 여부와 상관없이 'MV2' 3글자 우선 검사
+        // 3. 'MV2 ' 시그니처 (우리가 만든 Python 커스텀 인코더)
         else if (sigText.startsWith("MV2")) {
-            this.format = "MV2";
+            // 💡 핵심: 파이썬 커스텀 MV2는 헤더가 512바이트입니다.
+            this.format = "MV2 (Custom)";
             this.fps = 15;
-            await this.parseMV2(data);
+            await this.parseMV2(data, 512);
         } 
-        // 3. 예외 처리 (실제 Hex 값 화면에 출력)
         else {
-            throw new Error(`지원하지 않는 포맷! 헤더 Hex: [ ${hexDump} ]`);
+            throw new Error(`지원하지 않는 포맷입니다. (Sig: ${sigText})`);
         }
         
         document.getElementById('status').innerText = `[${this.format}] 파싱 완료! (${this.fps} FPS, ${this.totalFrames} 프레임)`;
         document.getElementById('btn-play').disabled = false;
     }
+
+    // ==========================================================
+    // 💡 [Format 2] MV2 파서 (헤더 오프셋 동적 적용)
+    // ==========================================================
+    async parseMV2(data, headerSize) {
+        this.frames = [];
+        let offset = headerSize; // 16384(공식) 또는 512(커스텀) 분기
+        let mp3Chunks = [];
+        
+        // 커스텀 MV2(512B 헤더)일 경우에만 첫 프레임을 15872로 읽습니다.
+        let isFirstFrame = (headerSize === 512);
+
+        while (offset < data.length) {
+            const blockSize = isFirstFrame ? 15872 : 16384;
+            if (offset + blockSize > data.length) break;
+
+            const pgt = data.slice(offset, offset + 6144);
+            const ct = data.slice(offset + 6144, offset + 12288);
+            const palRaw = data.slice(offset + 12288, offset + 12318);
+            
+            const sz = data[offset + 12800];
+            const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
+            
+            const palette = this.extractPalette(palRaw, 15);
+            this.frames.push({ pgt, ct, palette });
+            mp3Chunks.push(mp3Data);
+
+            offset += blockSize;
+            isFirstFrame = false; // 두 번째 프레임부터는 무조건 16384 적용
+        }
+
+        this.totalFrames = this.frames.length;
+
+        // MP3 디코딩
+        const totalMp3Length = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        const mp3Concat = new Uint8Array(totalMp3Length);
+        let writeOffset = 0;
+        for (let chunk of mp3Chunks) {
+            mp3Concat.set(chunk, writeOffset);
+            writeOffset += chunk.length;
+        }
+        this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
+    }
+
 
     // ==========================================================
     // 💡 [Format 1] MV1 파서 (12fps, PCM Audio, 16KB Header)
@@ -126,48 +175,7 @@ class MSXMediaDemuxer {
         this.audioBuffer = audioBuffer;
     }
 
-    // ==========================================================
-    // 💡 [Format 2] MV2 파서 (15fps, MP3 Audio, 512B Header)
-    // ==========================================================
-    async parseMV2(data) {
-        this.frames = [];
-        let offset = 512; // 첫 512바이트만 글로벌 헤더
-        let mp3Chunks = [];
-        let isFirstFrame = true;
 
-        while (offset < data.length) {
-            const blockSize = isFirstFrame ? 15872 : 16384;
-            if (offset + blockSize > data.length) break;
-
-            const pgt = data.slice(offset, offset + 6144);
-            const ct = data.slice(offset + 6144, offset + 12288);
-            const palRaw = data.slice(offset + 12288, offset + 12318); // 30 bytes
-            
-            const sz = data[offset + 12800]; // MP3 청크 사이즈 인디케이터
-            const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
-            
-            const palette = this.extractPalette(palRaw, 15);
-            this.frames.push({ pgt, ct, palette });
-            mp3Chunks.push(mp3Data);
-
-            offset += blockSize;
-            isFirstFrame = false;
-        }
-
-        this.totalFrames = this.frames.length;
-
-        // 조각난 MP3 바이너리를 하나로 합쳐서 브라우저 네이티브 디코더에 위임
-        const totalMp3Length = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-        const mp3Concat = new Uint8Array(totalMp3Length);
-        let writeOffset = 0;
-        for (let chunk of mp3Chunks) {
-            mp3Concat.set(chunk, writeOffset);
-            writeOffset += chunk.length;
-        }
-
-        // Web Audio API 비동기 하드웨어 MP3 디코딩
-        this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
-    }
 
     // MSX2 RGB333 (2Bytes) -> RGB888 (배열) 변환
     extractPalette(palData, colorCount) {
