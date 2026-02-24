@@ -52,24 +52,36 @@ class MSXMediaDemuxer {
         this.totalFrames = 0;
     }
 
+
     async loadFile(file) {
         document.getElementById('status').innerText = "파일 분석 중...";
         const arrayBuffer = await file.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
         
-        // 1. 헤더 시그니처 판별
-        const sig = new TextDecoder().decode(data.slice(0, 8));
-        
-        if (sig.startsWith("MMCSD_MV")) {
+        // 💡 디버깅을 위해 맨 앞 8바이트를 Hex 문자열로 추출
+        const hexDump = Array.from(data.slice(0, 8))
+                             .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+                             .join(' ');
+        console.log("[*] File Header Hex:", hexDump);
+
+        // 💡 TextDecoder 대신 String.fromCharCode를 사용하여 Null 바이트 간섭 최소화
+        const sigText = String.fromCharCode(...data.slice(0, 8));
+
+        // 1. 헤더 시그니처 판별 (MV1)
+        if (sigText.startsWith("MMCSD_MV")) {
             this.format = "MV1";
             this.fps = 12;
             await this.parseMV1(data);
-        } else if (sig.startsWith("MV2 ")) {
+        } 
+        // 2. 헤더 시그니처 판별 (MV2) - 공백 여부와 상관없이 'MV2' 3글자 우선 검사
+        else if (sigText.startsWith("MV2")) {
             this.format = "MV2";
             this.fps = 15;
             await this.parseMV2(data);
-        } else {
-            throw new Error("지원하지 않는 파일 포맷입니다.");
+        } 
+        // 3. 예외 처리 (실제 Hex 값 화면에 출력)
+        else {
+            throw new Error(`지원하지 않는 포맷! 헤더 Hex: [ ${hexDump} ]`);
         }
         
         document.getElementById('status').innerText = `[${this.format}] 파싱 완료! (${this.fps} FPS, ${this.totalFrames} 프레임)`;
