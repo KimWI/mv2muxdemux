@@ -209,86 +209,109 @@ class MV2PerfectFrameEncoder:
         return pal_333, pal_888_np
 
     def run(self):
-        print(f"[*] 순차적 단일 프레임 완벽 인코딩 시작 (알고리즘: {self.quant_algo.upper()}, 디더: {self.dither_mode.upper()})")
-        
-        time_args = []
-        if self.start_sec > 0: time_args.extend(["-ss", str(self.start_sec)])
-        if self.end_sec: time_args.extend(["-to", str(self.end_sec)])
-
-        subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "libmp3lame", "-ac", "2", "-ar", "44100", "-b:a", "128k", "-id3v2_version", "0", self.temp_mp3], capture_output=True)
-
-        if not self.skip_prescale:
-            print("[*] FFmpeg 512x384 사전 렌더링 중...")
-            if self.aspect_mode == 'pad': vf_string = "scale=512:384:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:384:-1:-1:color=black"
-            elif self.aspect_mode == 'crop': vf_string = "scale=512:384:force_original_aspect_ratio=increase:flags=lanczos,crop=512:384"
-            else: vf_string = "scale=512:384:flags=lanczos"
-
-            subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-an", "-vf", vf_string, "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", self.temp_vid], capture_output=True)
-            cap = cv2.VideoCapture(self.temp_vid)
-            orig_fps = 15.0
-        else:
-            cap = cv2.VideoCapture(self.input_video)
-            orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-        with open(self.temp_mp3, "rb") as f: mp3_data = f.read()
-        out_f = open(self.output_mv2, "wb")
-        out_f.write(bytearray(b'MV2 ').ljust(512, b'\x00')) 
-
-        idx, mp3_off, bps = 0, 0, 16000 
-        dither_flag = 2 if self.dither_mode == 'jjn' else (1 if self.dither_mode == 'fs' else 0)
-
-        while cap.isOpened():
-            if self.skip_prescale:
-                current_time = self.start_sec + (idx / 15.0)
-                if self.end_sec and current_time > self.end_sec: break
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(current_time * orig_fps))
-
-            ret, frame = cap.read()
-            if not ret or mp3_off >= len(mp3_data): break
-
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img_512 = cv2.resize(img_rgb, (512, 384), interpolation=cv2.INTER_LANCZOS4) if self.skip_prescale else img_rgb
+            print(f"[*] 공식 규격 완벽 인코딩 시작 (알고리즘: {self.quant_algo.upper()}, 디더: {self.dither_mode.upper()})")
             
-            pal_333, pal_888_np = self._extract_palette_independent(img_512)
+            time_args = []
+            if self.start_sec > 0: time_args.extend(["-ss", str(self.start_sec)])
+            if self.end_sec: time_args.extend(["-to", str(self.end_sec)])
+
+            # 1. MP3 오디오 추출
+            subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "libmp3lame", "-ac", "2", "-ar", "44100", "-b:a", "128k", "-id3v2_version", "0", self.temp_mp3], capture_output=True)
+
+            # 2. 비디오 프리스케일링
+            if not self.skip_prescale:
+                print("[*] FFmpeg 512x384 사전 렌더링 중...")
+                if self.aspect_mode == 'pad': vf_string = "scale=512:384:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:384:-1:-1:color=black"
+                elif self.aspect_mode == 'crop': vf_string = "scale=512:384:force_original_aspect_ratio=increase:flags=lanczos,crop=512:384"
+                else: vf_string = "scale=512:384:flags=lanczos"
+
+                subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-an", "-vf", vf_string, "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", self.temp_vid], capture_output=True)
+                cap = cv2.VideoCapture(self.temp_vid)
+                orig_fps = 15.0
+            else:
+                cap = cv2.VideoCapture(self.input_video)
+                orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+            with open(self.temp_mp3, "rb") as f: mp3_data = f.read()
+            out_f = open(self.output_mv2, "wb")
             
-            img_256 = cv2.resize(img_512, (256, 192), interpolation=cv2.INTER_AREA)
-            img_rgb_diffused = _apply_dither_rgb(img_256, pal_888_np, dither_flag)
-            
-            pgt, ct = _encode_vram_optimal_search(img_rgb_diffused, pal_888_np)
-            
-            if self.debug_frames:
-                before_bgr = cv2.cvtColor(img_256, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_before.png"), before_bgr)
+            # ==========================================================
+            # 💡 [핵심 수정 1] 512B 폐기 -> 완벽한 16KB(16384) 공식 헤더 작성
+            # ==========================================================
+            official_header = bytearray(16384)
+            official_header[0:8] = b'MMCSD_MV'          # 공통 시그니처
+            official_header[8:16] = b'        '         # 8바이트 공백
+            official_header[16:21] = b'v2.00'           # 버전 정보
+            out_f.write(official_header)
+
+            idx, mp3_off, bps = 0, 0, 16000 
+            dither_flag = 2 if self.dither_mode == 'jjn' else (1 if self.dither_mode == 'fs' else 0)
+
+            while cap.isOpened():
+                if self.skip_prescale:
+                    current_time = self.start_sec + (idx / 15.0)
+                    if self.end_sec and current_time > self.end_sec: break
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(current_time * orig_fps))
+
+                ret, frame = cap.read()
+                if not ret or mp3_off >= len(mp3_data): break
+
+                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img_512 = cv2.resize(img_rgb, (512, 384), interpolation=cv2.INTER_LANCZOS4) if self.skip_prescale else img_rgb
                 
-                after_rgb = _reconstruct_msx_frame(pgt, ct, pal_888_np)
-                after_bgr = cv2.cvtColor(after_rgb, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_after.png"), after_bgr)
+                pal_333, pal_888_np = self._extract_palette_independent(img_512)
+                
+                img_256 = cv2.resize(img_512, (256, 192), interpolation=cv2.INTER_AREA)
+                img_rgb_diffused = _apply_dither_rgb(img_256, pal_888_np, dither_flag)
+                
+                pgt, ct = _encode_vram_optimal_search(img_rgb_diffused, pal_888_np)
+                
+                if self.debug_frames:
+                    before_bgr = cv2.cvtColor(img_256, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_before.png"), before_bgr)
+                    
+                    after_rgb = _reconstruct_msx_frame(pgt, ct, pal_888_np)
+                    after_bgr = cv2.cvtColor(after_rgb, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_after.png"), after_bgr)
 
-            pal_b = bytearray()
-            for r, g, b in pal_333: pal_b.extend([(r<<4)|b, g])
+                # ==========================================================
+                # 💡 [핵심 수정 2] Color 0번(투명/검정)을 포함한 32바이트 팔레트 정렬
+                # ==========================================================
+                pal_b = bytearray([0, 0]) # MSX Color 0 (Background) 강제 할당
+                for r, g, b in pal_333: 
+                    pal_b.extend([(r<<4)|b, g])
+                    
+                # 혹시 모를 오버플로우/언더플로우 방지 (정확히 32바이트 고정)
+                if len(pal_b) < 32: pal_b.extend(b'\x00' * (32 - len(pal_b)))
+                elif len(pal_b) > 32: pal_b = pal_b[:32]
 
-            block = bytearray(b'\x55' * (15872 if idx == 0 else 16384)) 
-            block[0:6144], block[6144:12288], block[12288:12318] = pgt.tobytes(), ct.tobytes(), pal_b
+                # ==========================================================
+                # 💡 [핵심 수정 3] 모든 프레임을 예외 없이 16,384 바이트로 고정
+                # ==========================================================
+                block = bytearray(b'\x55' * 16384) 
+                block[0:6144] = pgt.tobytes()
+                block[6144:12288] = ct.tobytes()
+                block[12288:12320] = pal_b # 정확히 32바이트 할당 (오프셋 밀림 원천 차단)
+                
+                target_a = int((idx + 1) * (bps / 15))
+                sz = max(1, min(111, math.ceil((target_a - mp3_off) / 32))) 
+                block[12800] = sz
+                chunk = mp3_data[mp3_off : mp3_off + sz*32]
+                block[12801 : 12801+len(chunk)] = chunk
+                mp3_off += len(chunk)
+                
+                out_f.write(block)
+                if idx % 10 == 0: sys.stdout.write(f"\r  > {idx} 프레임 정밀 최적화 인코딩 중..."); sys.stdout.flush()
+                idx += 1
+
+            print("\n")
+            eof = bytearray(16384); eof[12318] = 0x01; eof[12800] = 0x22 
+            out_f.write(eof); cap.release(); out_f.close()
             
-            target_a = int((idx + 1) * (bps / 15))
-            sz = max(1, min(111, math.ceil((target_a - mp3_off) / 32))) 
-            block[12800] = sz
-            chunk = mp3_data[mp3_off : mp3_off + sz*32]
-            block[12801 : 12801+len(chunk)] = chunk
-            mp3_off += len(chunk)
+            if os.path.exists(self.temp_mp3): os.remove(self.temp_mp3)
+            if os.path.exists(self.temp_vid): os.remove(self.temp_vid)
             
-            out_f.write(block)
-            if idx % 10 == 0: sys.stdout.write(f"\r  > {idx} 프레임 정밀 최적화 인코딩 중..."); sys.stdout.flush()
-            idx += 1
-
-        print("\n")
-        eof = bytearray(16384); eof[12318] = 0x01; eof[12800] = 0x22 
-        out_f.write(eof); cap.release(); out_f.close()
-        
-        if os.path.exists(self.temp_mp3): os.remove(self.temp_mp3)
-        if os.path.exists(self.temp_vid): os.remove(self.temp_vid)
-        
-        print(f"[!] 완벽 인코딩 완료: {self.output_mv2}")
+            print(f"[!] 공식 규격(16KB 헤더) 완벽 인코딩 완료: {self.output_mv2}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MSX2 MV2 Perfect Frame Encoder (Math Optimal)")

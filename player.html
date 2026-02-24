@@ -2,10 +2,10 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>MSX2 MV1/MV2 Universal Web Player (Final)</title>
+    <title>MSX2 MV1/MV2 Universal Web Player (Perfect Edition)</title>
     <style>
         body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 50px; }
-        /* 💡 캔버스 해상도 업스케일링 시 도트 뭉개짐 방지 */
+        /* 💡 캔버스 해상도 업스케일링 시 도트 뭉개짐 방지 (레트로 픽셀아트 필수 CSS) */
         #msx-screen {
             width: 768px; /* 256 * 3 */
             height: 576px; /* 192 * 3 */
@@ -54,20 +54,18 @@ class MSXMediaDemuxer {
     }
 
     // ==========================================================
-    // 💡 1. 파일 헤더 엄격 판별 (Official vs Custom)
+    // 💡 1. 파일 헤더 엄격 판별 (Official 16KB vs Legacy 512B)
     // ==========================================================
     async loadFile(file) {
         document.getElementById('status').innerText = "파일 분석 중...";
         const arrayBuffer = await file.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
         
-        // 널 바이트 간섭을 피하기 위해 String.fromCharCode 사용
         const sigText = String.fromCharCode(...data.slice(0, 8));
         const versionText = String.fromCharCode(...data.slice(16, 21));
         
         const hexDump = Array.from(data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
         document.getElementById('debug-info').innerText = `Header Hex: [${hexDump}] | Sig: [${sigText}] | Ver: [${versionText}]`;
-        console.log(`[*] 파일 로드 됨 - Signature: [${sigText}], Version: [${versionText}]`);
 
         try {
             if (sigText === "MMCSD_MV") {
@@ -76,7 +74,6 @@ class MSXMediaDemuxer {
                     this.fps = 12;
                     await this.parseMV1(data);
                 } else if (versionText === "v2.00") {
-                    // 공식 MV2는 16KB 통째로 헤더 사용
                     this.format = "MV2 (Official)";
                     this.fps = 15;
                     await this.parseMV2(data, 16384); 
@@ -85,10 +82,9 @@ class MSXMediaDemuxer {
                 }
             } 
             else if (sigText.startsWith("MV2")) {
-                // 커스텀 Python 인코더는 512B 헤더 사용
-                this.format = "MV2 (Custom)";
+                this.format = "MV2 (Legacy Custom)";
                 this.fps = 15;
-                await this.parseMV2(data, 512);
+                await this.parseMV2(data, 512); // 과거에 만든 512B 헤더 파일 대응
             } 
             else {
                 throw new Error(`지원하지 않는 포맷입니다. (Sig: ${sigText})`);
@@ -104,7 +100,7 @@ class MSXMediaDemuxer {
     }
 
     // ==========================================================
-    // 💡 2. MV1 파서 (12fps, PCM Audio)
+    // 💡 2. MV1 파서 (12fps, PCM Audio, 16KB Header)
     // ==========================================================
     async parseMV1(data) {
         this.frames = [];
@@ -114,8 +110,8 @@ class MSXMediaDemuxer {
         while (offset + 16384 <= data.length) {
             const pgt = data.slice(offset, offset + 6144);
             const ct = data.slice(offset + 6144, offset + 12288);
-            const pcm = data.slice(offset + 12288, offset + 13232); // 944 bytes
-            const palRaw = data.slice(offset + 13232, offset + 13264); // 32 bytes (16 colors)
+            const pcm = data.slice(offset + 12288, offset + 13232);
+            const palRaw = data.slice(offset + 13232, offset + 13264);
             
             const palette = this.extractPalette(palRaw, 16);
             this.frames.push({ pgt, ct, palette });
@@ -125,8 +121,7 @@ class MSXMediaDemuxer {
         }
         this.totalFrames = this.frames.length;
 
-        // PCM 11.3KHz 변환
-        const sampleRate = 944 * 12; 
+        const sampleRate = 944 * 12; // 11.3KHz
         const audioBuffer = this.audioCtx.createBuffer(1, this.totalFrames * 944, sampleRate);
         const channelData = audioBuffer.getChannelData(0);
         
@@ -140,15 +135,15 @@ class MSXMediaDemuxer {
     }
 
     // ==========================================================
-    // 💡 3. MV2 파서 (15fps, MP3 Audio, 동적 헤더 크기)
+    // 💡 3. MV2 파서 (15fps, MP3 Audio, 동적 헤더 및 팔레트 교정)
     // ==========================================================
     async parseMV2(data, headerSize) {
         this.frames = [];
         let offset = headerSize; 
         let mp3Chunks = [];
         
-        // 커스텀 MV2 (512B 헤더)일 때만 첫 프레임을 15872로 처리
-        let isFirstFrame = (headerSize === 512);
+        const isLegacy = (headerSize === 512);
+        let isFirstFrame = isLegacy;
 
         while (offset < data.length) {
             const blockSize = isFirstFrame ? 15872 : 16384;
@@ -157,9 +152,16 @@ class MSXMediaDemuxer {
             const pgt = data.slice(offset, offset + 6144);
             const ct = data.slice(offset + 6144, offset + 12288);
             
-            // 💡 팔레트를 32바이트(16색)로 넉넉하게 추출하여 색상 밀림 완전 차단
-            const palRaw = data.slice(offset + 12288, offset + 12320); 
-            const palette = this.extractPalette(palRaw, 16);
+            let palette;
+            // 💡 핵심: 레거시 파일(30바이트)의 컬러 밀림 현상 자동 교정 로직
+            if (isLegacy) {
+                const palRaw = data.slice(offset + 12288, offset + 12318);
+                // 0번 팔레트(투명/검정)를 맨 앞에 강제로 주입하여 1칸 밀림을 상쇄
+                palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
+            } else {
+                const palRaw = data.slice(offset + 12288, offset + 12320);
+                palette = this.extractPalette(palRaw, 16);
+            }
             
             const sz = data[offset + 12800];
             const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
@@ -168,11 +170,10 @@ class MSXMediaDemuxer {
             mp3Chunks.push(mp3Data);
 
             offset += blockSize;
-            isFirstFrame = false; // 두 번째 프레임부터는 16384
+            isFirstFrame = false; 
         }
         this.totalFrames = this.frames.length;
 
-        // 조각난 MP3 합치기 및 디코딩
         const totalMp3Length = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
         const mp3Concat = new Uint8Array(totalMp3Length);
         let writeOffset = 0;
@@ -184,11 +185,10 @@ class MSXMediaDemuxer {
     }
 
     // ==========================================================
-    // 💡 MSX2 VDP RGB333 팔레트 추출
+    // 💡 MSX2 VDP RGB333 팔레트 추출 코어
     // ==========================================================
     extractPalette(palData, colorCount) {
         const pal = [];
-        // MSX 하드웨어 구조를 반영하여 루프로 0번 색상부터 파싱
         for (let i = 0; i < colorCount; i++) {
             if (i * 2 + 1 >= palData.length) break;
             
@@ -201,8 +201,7 @@ class MSXMediaDemuxer {
             
             pal.push([r8, g8, b8]);
         }
-        // 예비용으로 모자란 색상은 검정으로 채움
-        while (pal.length < 16) pal.push([0, 0, 0]);
+        while (pal.length < colorCount) pal.push([0, 0, 0]);
         return pal;
     }
 
@@ -287,15 +286,13 @@ class MSXMediaDemuxer {
     }
 }
 
-// ==========================================================
-// 💡 UI 이벤트 바인딩
-// ==========================================================
+// UI 이벤트 바인딩
 const player = new MSXMediaDemuxer('msx-screen');
 
 document.getElementById('file-input').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    document.getElementById('status').style.color = "#4CAF50"; // 에러 색상 초기화
+    document.getElementById('status').style.color = "#4CAF50"; 
     await player.loadFile(file);
 });
 
