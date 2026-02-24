@@ -152,15 +152,16 @@
         async function demuxMV2(arrayBuffer) {
             const data = new Uint8Array(arrayBuffer);
             const blockSize = 16384;
-            let remainingBytes = data.length - 512;
-            let numBlocks = remainingBytes >= 15872 ? 1 + Math.floor((remainingBytes - 15872) / 16384) : 0;
+            let remainingBytes = data.length - blockSize; 
+            /* let numBlocks = remainingBytes >= 15872 ? 1 + Math.floor((remainingBytes - 15872) / 16384) : 0; */
+            let numBlocks = 1 + Math.floor(remainingBytes / 16384);
 
             const videoBuffer = new Uint8Array(numBlocks * 256 * 192 * 3);
             let videoOffset = 0;
             let audioChunks = [];
             let palette = Array(16).fill([0, 0, 0]);
 
-            let pos = 512;
+            let pos = 16384;
             let count = 0;
 
             while (pos < data.length) {
