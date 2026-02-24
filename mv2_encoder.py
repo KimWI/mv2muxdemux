@@ -5,7 +5,7 @@ from numba import njit, prange
 from PIL import Image
 
 # ==========================================================
-# 1. Numba JIT 고속 연산부 (단일 프레임 극한 최적화 및 역산)
+# 1. Numba JIT 고속 연산부
 # ==========================================================
 @njit(fastmath=True, cache=True)
 def _get_dist_sq(c1, c2):
@@ -13,12 +13,9 @@ def _get_dist_sq(c1, c2):
 
 @njit(fastmath=True, cache=True)
 def _apply_dither_rgb(img_array, pal_888, mode):
-    """오차 확산(Error Diffusion) 디더링 - Floyd-Steinberg, JJN"""
     h, w = 192, 256
     temp_img = img_array.astype(np.float32)
-    
-    if mode == 0: # None
-        return temp_img
+    if mode == 0: return temp_img
         
     strength = 0.75 
     for y in range(h):
@@ -37,16 +34,12 @@ def _apply_dither_rgb(img_array, pal_888, mode):
             er, eg, eb = (r - nr) * strength, (g - ng) * strength, (b - nb) * strength
             
             if mode == 1: # Floyd-Steinberg
-                if x + 1 < w:
-                    temp_img[y, x+1, 0] += er * 0.4375; temp_img[y, x+1, 1] += eg * 0.4375; temp_img[y, x+1, 2] += eb * 0.4375
+                if x + 1 < w: temp_img[y, x+1, 0] += er * 0.4375; temp_img[y, x+1, 1] += eg * 0.4375; temp_img[y, x+1, 2] += eb * 0.4375
                 if y + 1 < h:
-                    if x > 0:
-                        temp_img[y+1, x-1, 0] += er * 0.1875; temp_img[y+1, x-1, 1] += eg * 0.1875; temp_img[y+1, x-1, 2] += eb * 0.1875
+                    if x > 0: temp_img[y+1, x-1, 0] += er * 0.1875; temp_img[y+1, x-1, 1] += eg * 0.1875; temp_img[y+1, x-1, 2] += eb * 0.1875
                     temp_img[y+1, x, 0] += er * 0.3125; temp_img[y+1, x, 1] += eg * 0.3125; temp_img[y+1, x, 2] += eb * 0.3125
-                    if x + 1 < w:
-                        temp_img[y+1, x+1, 0] += er * 0.0625; temp_img[y+1, x+1, 1] += eg * 0.0625; temp_img[y+1, x+1, 2] += eb * 0.0625
-                        
-            elif mode == 2: # Jarvis-Judice-Ninke
+                    if x + 1 < w: temp_img[y+1, x+1, 0] += er * 0.0625; temp_img[y+1, x+1, 1] += eg * 0.0625; temp_img[y+1, x+1, 2] += eb * 0.0625
+            elif mode == 2: # JJN
                 if x + 1 < w: temp_img[y, x+1, 0] += er*(7/48); temp_img[y, x+1, 1] += eg*(7/48); temp_img[y, x+1, 2] += eb*(7/48)
                 if x + 2 < w: temp_img[y, x+2, 0] += er*(5/48); temp_img[y, x+2, 1] += eg*(5/48); temp_img[y, x+2, 2] += eb*(5/48)
                 if y + 1 < h:
@@ -65,109 +58,67 @@ def _apply_dither_rgb(img_array, pal_888, mode):
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _apply_bayer_dither(img_array, spread=36.0):
-    """
-    4x4 베이어 매트릭스를 이용한 오더드 디더링 (고속 병렬 처리)
-    규칙적인 크로스해치(Crosshatch) 패턴을 생성하여 레트로 감성을 극대화합니다.
-    """
     h, w = 192, 256
-    bayer_4x4 = np.array([
-        [  0,  8,  2, 10 ],
-        [ 12,  4, 14,  6 ],
-        [  3, 11,  1,  9 ],
-        [ 15,  7, 13,  5 ]
-    ], dtype=np.float32) / 16.0 - 0.5
-    
+    bayer_4x4 = np.array([[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]], dtype=np.float32) / 16.0 - 0.5
     temp_img = np.zeros_like(img_array, dtype=np.float32)
-    
     for y in prange(h):
         for x in range(w):
             offset = bayer_4x4[y % 4, x % 4] * spread
             for c in range(3):
-                val = img_array[y, x, c] + offset
-                temp_img[y, x, c] = min(max(val, 0.0), 255.0)
-                
+                temp_img[y, x, c] = min(max(img_array[y, x, c] + offset, 0.0), 255.0)
+    return temp_img
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _apply_bayer8_dither(img_array, spread=36.0):
+    h, w = 192, 256
+    bayer_8x8 = np.array([
+        [0,32,8,40,2,34,10,42],[48,16,56,24,50,18,58,26],[12,44,4,36,14,46,6,38],[60,28,52,20,62,30,54,22],
+        [3,35,11,43,1,33,9,41],[51,19,59,27,49,17,57,25],[15,47,7,39,13,45,5,37],[63,31,55,23,61,29,53,21]
+    ], dtype=np.float32) / 64.0 - 0.5
+    temp_img = np.zeros_like(img_array, dtype=np.float32)
+    for y in prange(h):
+        for x in range(w):
+            offset = bayer_8x8[y % 8, x % 8] * spread
+            for c in range(3):
+                temp_img[y, x, c] = min(max(img_array[y, x, c] + offset, 0.0), 255.0)
     return temp_img
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _encode_vram_optimal_search(img_rgb_float, pal_888):
-    """모든 15x15 색상 조합을 대입하여 8x1 블록의 MSE를 최소화하는 PGT/CT를 생성합니다."""
     h, w = 192, 256
     pgt, ct = np.zeros(6144, dtype=np.uint8), np.zeros(6144, dtype=np.uint8)
-    
     for y in prange(h):
         for cx in range(32):
             x_start = cx * 8
             block_rgb = img_rgb_float[y, x_start : x_start + 8]
-            
-            best_err = 1e12
-            best_fg, best_bg = 1, 1
+            best_err = 1e12; best_fg = 1; best_bg = 1
             
             for i in range(1, 16):
                 for j in range(1, i + 1):
                     err = 0.0
                     for p in range(8):
                         r, g, b = block_rgb[p]
-                        r_cl, g_cl, b_cl = max(0.0, min(255.0, r)), max(0.0, min(255.0, g)), max(0.0, min(255.0, b))
-                        
+                        r_cl = max(0.0, min(255.0, r)); g_cl = max(0.0, min(255.0, g)); b_cl = max(0.0, min(255.0, b))
                         d_i = (r_cl - pal_888[i,0])**2 + (g_cl - pal_888[i,1])**2 + (b_cl - pal_888[i,2])**2
                         d_j = (r_cl - pal_888[j,0])**2 + (g_cl - pal_888[j,1])**2 + (b_cl - pal_888[j,2])**2
-                        
                         err += d_i if d_i < d_j else d_j
-                        
                     if err < best_err:
-                        best_err = err
-                        best_fg, best_bg = i, j
+                        best_err = err; best_fg = i; best_bg = j
             
             p_byte = 0
             for p in range(8):
                 r, g, b = block_rgb[p]
-                r_cl, g_cl, b_cl = max(0.0, min(255.0, r)), max(0.0, min(255.0, g)), max(0.0, min(255.0, b))
-                
+                r_cl = max(0.0, min(255.0, r)); g_cl = max(0.0, min(255.0, g)); b_cl = max(0.0, min(255.0, b))
                 d_fg = (r_cl - pal_888[best_fg,0])**2 + (g_cl - pal_888[best_fg,1])**2 + (b_cl - pal_888[best_fg,2])**2
                 d_bg = (r_cl - pal_888[best_bg,0])**2 + (g_cl - pal_888[best_bg,1])**2 + (b_cl - pal_888[best_bg,2])**2
-                
-                if d_fg <= d_bg:
-                    p_byte |= (1 << (7 - p))
+                if d_fg <= d_bg: p_byte |= (1 << (7 - p))
             
             off = ((y // 8) * 32 + cx) * 8 + (y % 8)
-            pgt[off] = p_byte
-            ct[off] = (best_fg << 4) | best_bg
-            
+            pgt[off] = p_byte; ct[off] = (best_fg << 4) | best_bg
     return pgt, ct
-
-@njit(parallel=True, fastmath=True, cache=True)
-def _apply_bayer8_dither(img_array, spread=36.0):
-    """
-    8x8 베이어 매트릭스를 이용한 오더드 디더링 (고속 병렬 처리)
-    64단계의 부드러운 계조를 형성하지만, MSX 8x1 클래시와 만나면 과도한 패턴이 생길 수 있습니다.
-    """
-    h, w = 192, 256
-    # 8x8 정석 Bayer Matrix 정규화 (-0.5 ~ +0.5)
-    bayer_8x8 = np.array([
-        [ 0, 32,  8, 40,  2, 34, 10, 42],
-        [48, 16, 56, 24, 50, 18, 58, 26],
-        [12, 44,  4, 36, 14, 46,  6, 38],
-        [60, 28, 52, 20, 62, 30, 54, 22],
-        [ 3, 35, 11, 43,  1, 33,  9, 41],
-        [51, 19, 59, 27, 49, 17, 57, 25],
-        [15, 47,  7, 39, 13, 45,  5, 37],
-        [63, 31, 55, 23, 61, 29, 53, 21]
-    ], dtype=np.float32) / 64.0 - 0.5
-    
-    temp_img = np.zeros_like(img_array, dtype=np.float32)
-    
-    for y in prange(h):
-        for x in range(w):
-            offset = bayer_8x8[y % 8, x % 8] * spread
-            for c in range(3):
-                val = img_array[y, x, c] + offset
-                temp_img[y, x, c] = min(max(val, 0.0), 255.0)
-                
-    return temp_img
 
 @njit(fastmath=True, cache=True)
 def _reconstruct_msx_frame(pgt, ct, pal_888_np):
-    """생성된 바이너리를 역산하여 실제 MSX2 출력 영상을 재구성합니다."""
     h, w = 192, 256
     out_img = np.zeros((h, w, 3), dtype=np.uint8)
     for y in range(h):
@@ -203,16 +154,31 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, debug_frames=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
         self.dither_mode = dither_mode.lower()
         self.aspect_mode = aspect_mode.lower()
         self.skip_prescale = skip_prescale
-        self.debug_frames = debug_frames
         self.start_sec = parse_time_str(start_time)
         self.end_sec = parse_time_str(end_time) if end_time else None
+        
+        self.use_temporal = use_temporal
+        self.scene_thresh = scene_thresh  
+        self.debug_frames = debug_frames 
+        self.use_roi_face = use_roi_face # 💡 [추가] 얼굴 인식 집중 모드 스위치
+
+        self.prev_hist = None
+        self.prev_centroids = None
+        
+        # 💡 [핵심] OpenCV에 내장된 Haar Cascade 정면 얼굴 인식 모델 로드
+        if self.use_roi_face:
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            self.face_cascade = cv2.CascadeClassifier(cascade_path)
+            if self.face_cascade.empty():
+                print("[!] 경고: OpenCV Haar Cascade 모델을 로드할 수 없습니다. ROI 기능이 무시됩니다.")
+                self.use_roi_face = False
 
         self.base_name = os.path.splitext(os.path.basename(input_video))[0]
         hash_str = hashlib.md5(f"{input_video}_{os.getpid()}".encode()).hexdigest()[:8]
@@ -224,62 +190,99 @@ class MV2PerfectFrameEncoder:
             os.makedirs(self.debug_dir, exist_ok=True)
             print(f"[*] 디버그 모드 활성화: 프레임 이미지가 '{self.debug_dir}' 폴더에 저장됩니다.")
 
-    def _extract_palette_independent(self, img_np):
-        """이전 프레임의 기억을 배제하고 선택된 알고리즘으로 팔레트 독립 추출"""
+    def _detect_scene_change(self, img_np):
+        hist = cv2.calcHist([img_np], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+        cv2.normalize(hist, hist)
+        
+        is_scene_change = False
+        if self.prev_hist is not None:
+            score = cv2.compareHist(self.prev_hist, hist, cv2.HISTCMP_CORREL)
+            if score < self.scene_thresh:
+                is_scene_change = True
+        else:
+            is_scene_change = True
+            
+        self.prev_hist = hist
+        return is_scene_change
+
+    def _extract_palette(self, img_np, is_scene_change):
         n_colors = 15
         
         if self.quant_algo == 'kmeans':
             gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
-            edge_px = img_np[edges == 255]
-            weighted = np.vstack([img_np.reshape(-1,3)] + [edge_px]*5) if len(edge_px)>0 else img_np.reshape(-1,3)
             
-            unique_colors = len(np.unique(weighted, axis=0))
+            # 💡 [핵심] 픽셀 복제(가중치)를 위한 마스크 배열 생성 (기본값: 1배)
+            weight_mask = np.ones(gray.shape, dtype=np.uint8)
+            
+            # 1. 윤곽선 가중치 (기존 5배수 유지)
+            edges = cv2.Canny(gray, 50, 150)
+            weight_mask[edges == 255] = 5
+            
+            # 2. 얼굴 인식 ROI 가중치 (압도적인 30배수 할당!)
+            face_detected = False
+            if self.use_roi_face:
+                faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+                for (x, y, w, h) in faces:
+                    # 얼굴 영역에 해당하는 마스크 배열 값을 30으로 덮어씌움
+                    weight_mask[y:y+h, x:x+w] = 30
+                    face_detected = True
+
+            # 3. 마스크(가중치)를 바탕으로 실제 픽셀 배열을 물리적으로 복제 (Numpy 매직)
+            flat_img = img_np.reshape(-1, 3)
+            flat_mask = weight_mask.reshape(-1)
+            weighted_pixels = np.repeat(flat_img, flat_mask, axis=0)
+            
+            # 메모리 폭주(OOM) 방지: 픽셀이 너무 많아지면 30만 개로 샘플링 (K-Means 속도 유지)
+            if len(weighted_pixels) > 300000:
+                np.random.shuffle(weighted_pixels)
+                weighted_pixels = weighted_pixels[:300000]
+            
+            unique_colors = len(np.unique(weighted_pixels, axis=0))
             if unique_colors < 1:
                 raw = [(0,0,0)] * 15
+                self.prev_centroids = None
             else:
+                n_clusters = min(unique_colors, 15)
+                
+                if self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters:
+                    init_val = np.array(self.prev_centroids)
+                    n_init_val = 1 
+                else:
+                    init_val = 'k-means++'
+                    n_init_val = 3 
+                    
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    km = KMeans(n_clusters=min(unique_colors, 15), init='k-means++', n_init=3, max_iter=30).fit(weighted)
+                    km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=30).fit(weighted_pixels)
                     raw = [tuple(c) for c in km.cluster_centers_]
+                    self.prev_centroids = raw.copy() 
+                    
+            return raw, face_detected # 💡 디버깅을 위해 얼굴 감지 여부 반환 변경
+
         else:
             pil_img = Image.fromarray(img_np)
             method = Image.Quantize.MEDIANCUT if self.quant_algo == 'mediancut' else Image.Quantize.FASTOCTREE
             quantized = pil_img.quantize(colors=n_colors, method=method)
             pal = quantized.getpalette()
-            
-            raw = []
-            if pal:
-                pal = pal[:n_colors * 3]
-                raw = [(pal[i], pal[i+1], pal[i+2]) for i in range(0, len(pal), 3)]
-
-        final_pal_888 = raw
-        while len(final_pal_888) < 15: final_pal_888.append((0,0,0))
-        
-        pal_333 = [tuple(int(round((c/255.0)*7)) for c in rgb) for rgb in final_pal_888[:15]]
-        pal_888_np = np.zeros((16, 3), dtype=np.int32)
-        for i, p in enumerate(pal_333):
-            pal_888_np[i+1] = [int(c*255//7) for c in p]
-            
-        return pal_333, pal_888_np
+            raw = [(pal[i], pal[i+1], pal[i+2]) for i in range(0, len(pal), 3)] if pal else []
+            return raw, False
 
     def run(self):
-        print(f"[*] 공식 규격 완벽 인코딩 시작 (알고리즘: {self.quant_algo.upper()}, 디더: {self.dither_mode.upper()})")
+        temporal_msg = f"활성화 (임계값: {self.scene_thresh})" if self.use_temporal else "비활성화"
+        roi_msg = "얼굴 집중(ROI 30x)" if self.use_roi_face else "기본"
+        print(f"[*] 공식 규격 인코딩 시작 (알고리즘: {self.quant_algo.upper()}, 디더: {self.dither_mode.upper()}, 시간적 일관성: {temporal_msg}, ROI: {roi_msg})")
         
         time_args = []
         if self.start_sec > 0: time_args.extend(["-ss", str(self.start_sec)])
         if self.end_sec: time_args.extend(["-to", str(self.end_sec)])
 
-        # 1. MP3 오디오 추출 (16KHz)
         subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "libmp3lame", "-ac", "2", "-ar", "44100", "-b:a", "128k", "-id3v2_version", "0", self.temp_mp3], capture_output=True)
 
-        # 2. 비디오 프리스케일링
         if not self.skip_prescale:
             print("[*] FFmpeg 512x384 사전 렌더링 중...")
             if self.aspect_mode == 'pad': vf_string = "scale=512:384:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:384:-1:-1:color=black"
             elif self.aspect_mode == 'crop': vf_string = "scale=512:384:force_original_aspect_ratio=increase:flags=lanczos,crop=512:384"
             else: vf_string = "scale=512:384:flags=lanczos"
-
             subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-an", "-vf", vf_string, "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", self.temp_vid], capture_output=True)
             cap = cv2.VideoCapture(self.temp_vid)
             orig_fps = 15.0
@@ -290,13 +293,10 @@ class MV2PerfectFrameEncoder:
         with open(self.temp_mp3, "rb") as f: mp3_data = f.read()
         out_f = open(self.output_mv2, "wb")
         
-        # ==========================================================
-        # 💡 [핵심] 완벽한 16KB(16384) 공식 글로벌 헤더 작성
-        # ==========================================================
         official_header = bytearray(16384)
-        official_header[0:8] = b'MMCSD_MV'          # 시그니처
-        official_header[8:16] = b'        '         # 8바이트 공백
-        official_header[16:21] = b'v2.00'           # 버전 정보
+        official_header[0:8] = b'MMCSD_MV'
+        official_header[8:16] = b'        '
+        official_header[16:21] = b'v2.00'
         out_f.write(official_header)
 
         idx, mp3_off, bps = 0, 0, 16000 
@@ -313,23 +313,33 @@ class MV2PerfectFrameEncoder:
             img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img_512 = cv2.resize(img_rgb, (512, 384), interpolation=cv2.INTER_LANCZOS4) if self.skip_prescale else img_rgb
             
-            pal_333, pal_888_np = self._extract_palette_independent(img_512)
+            is_scene_change = self._detect_scene_change(img_512)
+            
+            # 💡 [수정] 언패킹 로직 변경 및 팔레트 정렬 적용
+            raw_pal, face_detected = self._extract_palette(img_512, is_scene_change)
+            
+            final_pal_888 = raw_pal
+            while len(final_pal_888) < 15: final_pal_888.append((0,0,0))
+            final_pal_888 = final_pal_888[:15]
+            final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+            
+            pal_333 = [tuple(int(round((c/255.0)*7)) for c in rgb) for rgb in final_pal_888]
+            pal_888_np = np.zeros((16, 3), dtype=np.int32)
+            for i, p in enumerate(pal_333):
+                pal_888_np[i+1] = [int(c*255//7) for c in p]
+            
             img_256 = cv2.resize(img_512, (256, 192), interpolation=cv2.INTER_AREA)
             
-            # ==========================================================
-            # 💡 [핵심] Bayer 디더링과 에러 확산 디더링의 분기 처리
-            # ==========================================================
             if self.dither_mode == 'bayer':
                 img_rgb_diffused = _apply_bayer_dither(img_256.astype(np.float32))
             elif self.dither_mode == 'bayer8':
-                # 💡 새로 추가된 8x8 베이어 함수 호출!
                 img_rgb_diffused = _apply_bayer8_dither(img_256.astype(np.float32))
             else:
                 dither_flag = 2 if self.dither_mode == 'jjn' else (1 if self.dither_mode == 'fs' else 0)
                 img_rgb_diffused = _apply_dither_rgb(img_256, pal_888_np, dither_flag)
             
             pgt, ct = _encode_vram_optimal_search(img_rgb_diffused, pal_888_np)
-            
+
             if self.debug_frames:
                 before_bgr = cv2.cvtColor(img_256, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_before.png"), before_bgr)
@@ -337,24 +347,16 @@ class MV2PerfectFrameEncoder:
                 after_rgb = _reconstruct_msx_frame(pgt, ct, pal_888_np)
                 after_bgr = cv2.cvtColor(after_rgb, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(os.path.join(self.debug_dir, f"frame_{idx:04d}_after.png"), after_bgr)
-
-            # ==========================================================
-            # 💡 [핵심] MSX 하드웨어 규격에 맞춘 30바이트(15색) 오리지널 팔레트
-            # ==========================================================
+            
             pal_b = bytearray() 
-            for r, g, b in pal_333: 
-                pal_b.extend([(r<<4)|b, g])
-                
+            for r, g, b in pal_333: pal_b.extend([(r<<4)|b, g])
             if len(pal_b) < 30: pal_b.extend(b'\x00' * (30 - len(pal_b)))
             elif len(pal_b) > 30: pal_b = pal_b[:30]
 
-            # ==========================================================
-            # 💡 [핵심] 모든 프레임을 예외 없이 16,384 바이트 단위로 고정 패딩
-            # ==========================================================
             block = bytearray(b'\x55' * 16384) 
             block[0:6144] = pgt.tobytes()
             block[6144:12288] = ct.tobytes()
-            block[12288:12318] = pal_b # 30바이트 할당
+            block[12288:12318] = pal_b
             
             target_a = int((idx + 1) * (bps / 15))
             sz = max(1, min(111, math.ceil((target_a - mp3_off) / 32))) 
@@ -364,7 +366,10 @@ class MV2PerfectFrameEncoder:
             mp3_off += len(chunk)
             
             out_f.write(block)
-            if idx % 10 == 0: sys.stdout.write(f"\r  > {idx} 프레임 정밀 최적화 인코딩 중..."); sys.stdout.flush()
+            
+            status_char = "✂️ 씬 전환!" if is_scene_change else ("👤 얼굴 집중!" if face_detected else "  ")
+            sys.stdout.write(f"\r  > {idx} 프레임 인코딩 중... {status_char}        ")
+            sys.stdout.flush()
             idx += 1
 
         print("\n")
@@ -373,7 +378,6 @@ class MV2PerfectFrameEncoder:
         
         if os.path.exists(self.temp_mp3): os.remove(self.temp_mp3)
         if os.path.exists(self.temp_vid): os.remove(self.temp_vid)
-        
         print(f"[!] 공식 규격(16KB 헤더) 완벽 인코딩 완료: {self.output_mv2}")
 
 if __name__ == "__main__":
@@ -381,16 +385,19 @@ if __name__ == "__main__":
     parser.add_argument("input", help="입력 동영상 파일 (.mp4)")
     parser.add_argument("output", help="출력 동영상 파일 (.mv2)")
     parser.add_argument("--algo", choices=['kmeans', 'mediancut', 'octree'], default='kmeans', help="팔레트 양자화 알고리즘")
+    parser.add_argument("--dither", choices=['none', 'fs', 'jjn', 'bayer', 'bayer8'], default='none', help="디더링 모드")
+    parser.add_argument("--temporal", action="store_true", help="[추천] 씬 감지를 포함한 팔레트 시간적 일관성(깜빡임 방지) 활성화")
+    parser.add_argument("--scene-thresh", type=float, default=0.85, help="씬 전환 감지 임계값 (기본: 0.85 / 예민하게: 0.93)")
     
-    # 💡 디더링 옵션에 bayer 추가 완료
-    parser.add_argument("--dither", choices=['none', 'fs', 'jjn', 'bayer', 'bayer8'], default='none', 
-                        help="디더링 모드 (bayer: 4x4 패턴, bayer8: 8x8 극강 패턴)")
+    # 💡 [추가] 얼굴 인식 집중 ROI 옵션 (K-Means 전용)
+    parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
     
     parser.add_argument("-ss", dest="start", default=None)
     parser.add_argument("-to", dest="end", default=None)
     parser.add_argument("--aspect", choices=['pad', 'crop', 'force'], default='pad')
     parser.add_argument("--skip-prescale", action="store_true")
-    parser.add_argument("--debug-frames", action="store_true", help="인코딩 전/후 프레임을 임시 폴더에 저장")
+    
+    parser.add_argument("--debug-frame", "--debug-frames", dest="debug_frames", action="store_true", help="인코딩 전/후 프레임을 임시 폴더에 저장")
     
     args = parser.parse_args()
     
@@ -403,5 +410,8 @@ if __name__ == "__main__":
         end_time=args.end, 
         aspect_mode=args.aspect, 
         skip_prescale=args.skip_prescale,
-        debug_frames=args.debug_frames
+        use_temporal=args.temporal,
+        debug_frames=args.debug_frames,
+        scene_thresh=args.scene_thresh,
+        use_roi_face=args.roi_face  # 💡 [추가] 파라미터 전달
         ).run()
