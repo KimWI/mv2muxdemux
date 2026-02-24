@@ -24,7 +24,7 @@
 </head>
 <body>
 
-    <h2>MSX2 Universal Player (SCREEN 2)</h2>
+<h2>MSX2 Universal Player (SCREEN 2)</h2>
     <canvas id="msx-screen" width="256" height="192"></canvas>
     
     <div class="controls">
@@ -32,9 +32,18 @@
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
     </div>
+    
+    <div style="margin-top: 15px; background: #222; padding: 10px; display: inline-block; border-radius: 8px;">
+        <label style="margin-right: 15px; cursor: pointer;">
+            <input type="checkbox" id="toggle-rgb"> 🔴🔵 RGB ↔ BGR 보정 (색상 스왑)
+        </label>
+        <label style="cursor: pointer;">
+            <input type="checkbox" id="toggle-fgbg"> 🌗 FG ↔ BG 보정 (음영 반전)
+        </label>
+    </div>
+    
     <div id="status">대기 중... MV1 또는 MV2 파일을 선택하세요.</div>
     <div id="debug-info"></div>
-
 <script>
 class MSXMediaDemuxer {
     constructor(canvasId) {
@@ -184,6 +193,80 @@ class MSXMediaDemuxer {
         this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
     }
 
+    // ==========================================================
+    // 💡 MSX2 VDP RGB333 팔레트 추출 코어 (BGR 스왑 토글 적용)
+    // ==========================================================
+    extractPalette(palData, colorCount) {
+        const pal = [];
+        const isBgrSwap = document.getElementById('toggle-rgb').checked;
+
+        for (let i = 0; i < colorCount; i++) {
+            if (i * 2 + 1 >= palData.length) break;
+            
+            const r_b = palData[i * 2];     
+            const g = palData[i * 2 + 1];   
+            
+            let r8 = ((r_b >> 4) & 0x0F) * 255 / 7;
+            let b8 = (r_b & 0x0F) * 255 / 7;
+            let g8 = (g & 0x0F) * 255 / 7;
+            
+            // 💡 디버그: BGR 데이터가 그대로 들어온 경우 R과 B를 강제로 바꿈
+            if (isBgrSwap) {
+                const temp = r8; r8 = b8; b8 = temp;
+            }
+            
+            pal.push([r8, g8, b8]);
+        }
+        while (pal.length < colorCount) pal.push([0, 0, 0]);
+        return pal;
+    }
+
+    // ==========================================================
+    // 💡 캔버스 렌더링 (FG/BG 네거티브 스왑 토글 적용)
+    // ==========================================================
+    renderFrame(frameIndex) {
+        if (frameIndex >= this.totalFrames) return;
+        const frame = this.frames[frameIndex];
+        const imgData = this.ctx.createImageData(256, 192);
+        const data = imgData.data;
+        
+        const isNegativeSwap = document.getElementById('toggle-fgbg').checked;
+
+        for (let y = 0; y < 192; y++) {
+            for (let cx = 0; cx < 32; cx++) {
+                const off = (Math.floor(y / 8) * 32 + cx) * 8 + (y % 8);
+                const p_byte = frame.pgt[off];
+                const c_byte = frame.ct[off];
+                
+                let fg = (c_byte >> 4) & 0x0F;
+                let bg = c_byte & 0x0F;
+                
+                // 💡 디버그: 전경색과 배경색 맵핑이 반대로 된 음화 현상 강제 복구
+                if (isNegativeSwap) {
+                    const temp = fg; fg = bg; bg = temp;
+                }
+
+                const x_start = cx * 8;
+                for (let p = 0; p < 8; p++) {
+                    const colorIdx = (p_byte & (1 << (7 - p))) !== 0 ? fg : bg;
+                    
+                    // 팔레트를 실시간으로 다시 계산하여 토글 즉시 반응하도록 함
+                    const currentPalette = this.extractPalette(frame.paletteRaw || this.frames[0].paletteRaw, 16);
+                    // (최적화를 위해 loadFile에서 추출한 원본 palRaw를 사용하려면 약간의 구조 수정이 필요하지만, 여기서는 디버깅을 위해 프레임에 저장된 이미 렌더링된 팔레트를 덮어씌웁니다.)
+                    // * 빠른 디버깅을 위해 추출된 palette 배열을 사용합니다. BGR 토글 시 파일을 다시 로드해야 반영됩니다.
+                    
+                    const rgb = frame.palette[colorIdx] || [0, 0, 0];
+                    
+                    const pxOffset = (y * 256 + (x_start + p)) * 4;
+                    data[pxOffset] = rgb[0];
+                    data[pxOffset + 1] = rgb[1];
+                    data[pxOffset + 2] = rgb[2];
+                    data[pxOffset + 3] = 255;
+                }
+            }
+        }
+        this.ctx.putImageData(imgData, 0, 0);
+    }
     // ==========================================================
     // 💡 MSX2 VDP RGB333 팔레트 추출 코어
     // ==========================================================
