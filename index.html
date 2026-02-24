@@ -166,7 +166,8 @@
             let count = 0;
 
             while (pos < data.length) {
-                let currentBlockSize = (count === 0) ? 15872 : 16384;
+                /* let currentBlockSize = (count === 0) ? 15872 : 16384; */
+                let currentBlockSize = 16384;
                 if (pos + currentBlockSize > data.length) break;
 
                 let block = data.subarray(pos, pos + currentBlockSize);
