@@ -1,53 +1,153 @@
-async loadFile(file) {
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>MSX2 MV1/MV2 Universal Web Player (Final)</title>
+    <style>
+        body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 50px; }
+        /* 💡 캔버스 해상도 업스케일링 시 도트 뭉개짐 방지 */
+        #msx-screen {
+            width: 768px; /* 256 * 3 */
+            height: 576px; /* 192 * 3 */
+            image-rendering: pixelated;
+            border: 4px solid #333;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            background-color: #000;
+        }
+        .controls { margin-top: 20px; }
+        button, input { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #333; color: white; border: 1px solid #555; }
+        button:hover { background: #555; }
+        button:disabled { background: #222; color: #666; cursor: not-allowed; }
+        #status { margin-top: 15px; font-weight: bold; color: #4CAF50; }
+        #debug-info { margin-top: 10px; font-size: 12px; color: #aaa; }
+    </style>
+</head>
+<body>
+
+    <h2>MSX2 Universal Player (SCREEN 2)</h2>
+    <canvas id="msx-screen" width="256" height="192"></canvas>
+    
+    <div class="controls">
+        <input type="file" id="file-input" accept=".mv1,.mv2" />
+        <button id="btn-play" disabled>▶ Play</button>
+        <button id="btn-pause" disabled>⏸ Pause</button>
+    </div>
+    <div id="status">대기 중... MV1 또는 MV2 파일을 선택하세요.</div>
+    <div id="debug-info"></div>
+
+<script>
+class MSXMediaDemuxer {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        this.frames = [];
+        this.audioSource = null;
+        this.isPlaying = false;
+        this.startTime = 0;
+        this.pauseTime = 0;
+        this.animationId = null;
+        
+        this.format = null;
+        this.fps = 0;
+        this.totalFrames = 0;
+    }
+
+    // ==========================================================
+    // 💡 1. 파일 헤더 엄격 판별 (Official vs Custom)
+    // ==========================================================
+    async loadFile(file) {
         document.getElementById('status').innerText = "파일 분석 중...";
         const arrayBuffer = await file.arrayBuffer();
         const data = new Uint8Array(arrayBuffer);
         
-        // 1. 헤더 시그니처 및 버전 문자열 추출 (엄격한 바이트 매칭)
+        // 널 바이트 간섭을 피하기 위해 String.fromCharCode 사용
         const sigText = String.fromCharCode(...data.slice(0, 8));
         const versionText = String.fromCharCode(...data.slice(16, 21));
-
+        
+        const hexDump = Array.from(data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        document.getElementById('debug-info').innerText = `Header Hex: [${hexDump}] | Sig: [${sigText}] | Ver: [${versionText}]`;
         console.log(`[*] 파일 로드 됨 - Signature: [${sigText}], Version: [${versionText}]`);
 
-        // 2. 'MMCSD_MV' 시그니처 (공식 MV1 또는 공식 MV2)
-        if (sigText === "MMCSD_MV") {
-            if (versionText === "v1.00") {
-                this.format = "MV1 (Official)";
-                this.fps = 12;
-                await this.parseMV1(data);
-            } else if (versionText === "v2.00") {
-                // 💡 핵심: 업로드하신 공식 MV2는 헤더가 16KB(16384)입니다.
-                this.format = "MV2 (Official)";
+        try {
+            if (sigText === "MMCSD_MV") {
+                if (versionText === "v1.00") {
+                    this.format = "MV1 (Official)";
+                    this.fps = 12;
+                    await this.parseMV1(data);
+                } else if (versionText === "v2.00") {
+                    // 공식 MV2는 16KB 통째로 헤더 사용
+                    this.format = "MV2 (Official)";
+                    this.fps = 15;
+                    await this.parseMV2(data, 16384); 
+                } else {
+                    throw new Error(`알 수 없는 공식 버전입니다: ${versionText}`);
+                }
+            } 
+            else if (sigText.startsWith("MV2")) {
+                // 커스텀 Python 인코더는 512B 헤더 사용
+                this.format = "MV2 (Custom)";
                 this.fps = 15;
-                await this.parseMV2(data, 16384); 
-            } else {
-                throw new Error(`알 수 없는 공식 버전입니다: ${versionText}`);
+                await this.parseMV2(data, 512);
+            } 
+            else {
+                throw new Error(`지원하지 않는 포맷입니다. (Sig: ${sigText})`);
             }
-        } 
-        // 3. 'MV2 ' 시그니처 (우리가 만든 Python 커스텀 인코더)
-        else if (sigText.startsWith("MV2")) {
-            // 💡 핵심: 파이썬 커스텀 MV2는 헤더가 512바이트입니다.
-            this.format = "MV2 (Custom)";
-            this.fps = 15;
-            await this.parseMV2(data, 512);
-        } 
-        else {
-            throw new Error(`지원하지 않는 포맷입니다. (Sig: ${sigText})`);
+            
+            document.getElementById('status').innerText = `[${this.format}] 파싱 완료! (${this.fps} FPS, ${this.totalFrames} 프레임)`;
+            document.getElementById('btn-play').disabled = false;
+        } catch (err) {
+            document.getElementById('status').innerText = `에러: ${err.message}`;
+            document.getElementById('status').style.color = "#ff4444";
+            console.error(err);
         }
-        
-        document.getElementById('status').innerText = `[${this.format}] 파싱 완료! (${this.fps} FPS, ${this.totalFrames} 프레임)`;
-        document.getElementById('btn-play').disabled = false;
     }
 
     // ==========================================================
-    // 💡 [Format 2] MV2 파서 (헤더 오프셋 동적 적용)
+    // 💡 2. MV1 파서 (12fps, PCM Audio)
+    // ==========================================================
+    async parseMV1(data) {
+        this.frames = [];
+        let offset = 16384; 
+        let pcmChunks = [];
+
+        while (offset + 16384 <= data.length) {
+            const pgt = data.slice(offset, offset + 6144);
+            const ct = data.slice(offset + 6144, offset + 12288);
+            const pcm = data.slice(offset + 12288, offset + 13232); // 944 bytes
+            const palRaw = data.slice(offset + 13232, offset + 13264); // 32 bytes (16 colors)
+            
+            const palette = this.extractPalette(palRaw, 16);
+            this.frames.push({ pgt, ct, palette });
+            pcmChunks.push(pcm);
+            
+            offset += 16384;
+        }
+        this.totalFrames = this.frames.length;
+
+        // PCM 11.3KHz 변환
+        const sampleRate = 944 * 12; 
+        const audioBuffer = this.audioCtx.createBuffer(1, this.totalFrames * 944, sampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+        
+        let writeOffset = 0;
+        for (let i = 0; i < pcmChunks.length; i++) {
+            for (let j = 0; j < 944; j++) {
+                channelData[writeOffset++] = (pcmChunks[i][j] - 128) / 128.0;
+            }
+        }
+        this.audioBuffer = audioBuffer;
+    }
+
+    // ==========================================================
+    // 💡 3. MV2 파서 (15fps, MP3 Audio, 동적 헤더 크기)
     // ==========================================================
     async parseMV2(data, headerSize) {
         this.frames = [];
-        let offset = headerSize; // 16384(공식) 또는 512(커스텀) 분기
+        let offset = headerSize; 
         let mp3Chunks = [];
         
-        // 커스텀 MV2(512B 헤더)일 경우에만 첫 프레임을 15872로 읽습니다.
+        // 커스텀 MV2 (512B 헤더)일 때만 첫 프레임을 15872로 처리
         let isFirstFrame = (headerSize === 512);
 
         while (offset < data.length) {
@@ -56,22 +156,23 @@ async loadFile(file) {
 
             const pgt = data.slice(offset, offset + 6144);
             const ct = data.slice(offset + 6144, offset + 12288);
-            const palRaw = data.slice(offset + 12288, offset + 12318);
+            
+            // 💡 팔레트를 32바이트(16색)로 넉넉하게 추출하여 색상 밀림 완전 차단
+            const palRaw = data.slice(offset + 12288, offset + 12320); 
+            const palette = this.extractPalette(palRaw, 16);
             
             const sz = data[offset + 12800];
             const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
             
-            const palette = this.extractPalette(palRaw, 15);
             this.frames.push({ pgt, ct, palette });
             mp3Chunks.push(mp3Data);
 
             offset += blockSize;
-            isFirstFrame = false; // 두 번째 프레임부터는 무조건 16384 적용
+            isFirstFrame = false; // 두 번째 프레임부터는 16384
         }
-
         this.totalFrames = this.frames.length;
 
-        // MP3 디코딩
+        // 조각난 MP3 합치기 및 디코딩
         const totalMp3Length = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
         const mp3Concat = new Uint8Array(totalMp3Length);
         let writeOffset = 0;
@@ -81,3 +182,126 @@ async loadFile(file) {
         }
         this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
     }
+
+    // ==========================================================
+    // 💡 MSX2 VDP RGB333 팔레트 추출
+    // ==========================================================
+    extractPalette(palData, colorCount) {
+        const pal = [];
+        // MSX 하드웨어 구조를 반영하여 루프로 0번 색상부터 파싱
+        for (let i = 0; i < colorCount; i++) {
+            if (i * 2 + 1 >= palData.length) break;
+            
+            const r_b = palData[i * 2];     
+            const g = palData[i * 2 + 1];   
+            
+            const r8 = ((r_b >> 4) & 0x0F) * 255 / 7;
+            const b8 = (r_b & 0x0F) * 255 / 7;
+            const g8 = (g & 0x0F) * 255 / 7;
+            
+            pal.push([r8, g8, b8]);
+        }
+        // 예비용으로 모자란 색상은 검정으로 채움
+        while (pal.length < 16) pal.push([0, 0, 0]);
+        return pal;
+    }
+
+    // ==========================================================
+    // 💡 캔버스 렌더링 (SCREEN 2)
+    // ==========================================================
+    renderFrame(frameIndex) {
+        if (frameIndex >= this.totalFrames) return;
+        const frame = this.frames[frameIndex];
+        const imgData = this.ctx.createImageData(256, 192);
+        const data = imgData.data;
+
+        for (let y = 0; y < 192; y++) {
+            for (let cx = 0; cx < 32; cx++) {
+                const off = (Math.floor(y / 8) * 32 + cx) * 8 + (y % 8);
+                const p_byte = frame.pgt[off];
+                const c_byte = frame.ct[off];
+                
+                const fg = (c_byte >> 4) & 0x0F;
+                const bg = c_byte & 0x0F;
+
+                const x_start = cx * 8;
+                for (let p = 0; p < 8; p++) {
+                    const colorIdx = (p_byte & (1 << (7 - p))) !== 0 ? fg : bg;
+                    const rgb = frame.palette[colorIdx] || [0, 0, 0];
+                    
+                    const pxOffset = (y * 256 + (x_start + p)) * 4;
+                    data[pxOffset] = rgb[0];
+                    data[pxOffset + 1] = rgb[1];
+                    data[pxOffset + 2] = rgb[2];
+                    data[pxOffset + 3] = 255;
+                }
+            }
+        }
+        this.ctx.putImageData(imgData, 0, 0);
+    }
+
+    // ==========================================================
+    // 💡 A/V Sync 재생 제어
+    // ==========================================================
+    play() {
+        if (this.isPlaying) return;
+        if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+
+        this.audioSource = this.audioCtx.createBufferSource();
+        this.audioSource.buffer = this.audioBuffer;
+        this.audioSource.connect(this.audioCtx.destination);
+        
+        this.audioSource.start(0, this.pauseTime);
+        this.startTime = this.audioCtx.currentTime - this.pauseTime;
+        this.isPlaying = true;
+
+        document.getElementById('btn-play').disabled = true;
+        document.getElementById('btn-pause').disabled = false;
+
+        const loop = () => {
+            if (!this.isPlaying) return;
+            
+            const currentTime = this.audioCtx.currentTime - this.startTime;
+            const currentFrame = Math.floor(currentTime * this.fps);
+            
+            if (currentFrame < this.totalFrames) {
+                this.renderFrame(currentFrame);
+                this.animationId = requestAnimationFrame(loop);
+            } else {
+                this.pause(); 
+            }
+        };
+        loop();
+    }
+
+    pause() {
+        if (!this.isPlaying) return;
+        this.isPlaying = false;
+        
+        this.audioSource.stop();
+        this.pauseTime = this.audioCtx.currentTime - this.startTime;
+        cancelAnimationFrame(this.animationId);
+
+        document.getElementById('btn-play').disabled = false;
+        document.getElementById('btn-pause').disabled = true;
+    }
+}
+
+// ==========================================================
+// 💡 UI 이벤트 바인딩
+// ==========================================================
+const player = new MSXMediaDemuxer('msx-screen');
+
+document.getElementById('file-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('status').style.color = "#4CAF50"; // 에러 색상 초기화
+    await player.loadFile(file);
+});
+
+document.getElementById('btn-play').addEventListener('click', () => player.play());
+document.getElementById('btn-pause').addEventListener('click', () => player.pause());
+
+</script>
+</body>
+</html>
