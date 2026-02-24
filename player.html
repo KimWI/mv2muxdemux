@@ -268,26 +268,6 @@ class MSXMediaDemuxer {
         this.ctx.putImageData(imgData, 0, 0);
     }
 
-    // ==========================================================
-    // 💡 MSX2 VDP RGB333 팔레트 추출 코어
-    // ==========================================================
-    extractPalette(palData, colorCount) {
-        const pal = [];
-        for (let i = 0; i < colorCount; i++) {
-            if (i * 2 + 1 >= palData.length) break;
-            
-            const r_b = palData[i * 2];     
-            const g = palData[i * 2 + 1];   
-            
-            const r8 = ((r_b >> 4) & 0x0F) * 255 / 7;
-            const b8 = (r_b & 0x0F) * 255 / 7;
-            const g8 = (g & 0x0F) * 255 / 7;
-            
-            pal.push([r8, g8, b8]);
-        }
-        while (pal.length < colorCount) pal.push([0, 0, 0]);
-        return pal;
-    }
 
     // ==========================================================
     // 💡 A/V Sync 재생 제어
