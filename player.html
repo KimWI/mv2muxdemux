@@ -2,93 +2,37 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>MSX2 MV2 Universal Web Player (Overlay EQ Edition)</title>
+    <title>MSX2 Universal Player & Recorder</title>
+    <script src="coi-serviceworker.js"></script>
+    <script src="ffmpeg.js"></script>
     <style>
         body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 30px; }
-        
-        /* 💡 추가: 캔버스와 오버레이를 감싸는 래퍼 */
-        #screen-wrapper {
-            position: relative;
-            display: inline-block;
-            box-shadow: 0 0 20px rgba(0,0,0,0.8);
-            border: 4px solid #333;
-            background-color: #000;
-        }
-
-        #msx-screen {
-            width: 768px;
-            height: 576px;
-            image-rendering: pixelated;
-            display: block; /* 래퍼 내부에서 여백 제거 */
-            transition: width 0.2s, height 0.2s; 
-        }
-
-        /* 💡 추가: 1/16 사이즈 오버레이 스타일 (가로 25%, 세로 25%) */
-	#eq-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 25%;
-            height: 25%;
-            background-color: transparent; /* 💡 여기를 transparent로 변경 */
-            pointer-events: none; 
-            display: none; 
-            align-items: flex-end;
-            justify-content: space-between;
-            padding: 2%; 
-            box-sizing: border-box;
-            gap: 2px;
-            z-index: 10;
-        }
-
-	.overlay-eq-bar {
-            flex: 1;
-            background-color: rgba(255, 255, 255, 0.2); /* 💡 여기를 rgba로 변경 */
-            height: 0%;
-            border-radius: 2px 2px 0 0;
-            transition: height 0.05s ease-out;
-        }
-        
+        #screen-wrapper { position: relative; display: inline-block; box-shadow: 0 0 20px rgba(0,0,0,0.8); border: 4px solid #333; background-color: #000; }
+        #msx-screen { width: 768px; height: 576px; image-rendering: pixelated; display: block; transition: width 0.2s, height 0.2s; }
+        #eq-overlay { position: absolute; top: 0; left: 0; width: 25%; height: 25%; background-color: transparent; pointer-events: none; display: none; align-items: flex-end; justify-content: space-between; padding: 2%; box-sizing: border-box; gap: 2px; z-index: 10; }
+        .overlay-eq-bar { flex: 1; background-color: rgba(255, 255, 255, 0.2); height: 0%; border-radius: 2px 2px 0 0; transition: height 0.05s ease-out; }
         .controls { margin-top: 20px; display: flex; justify-content: center; gap: 15px; align-items: center; flex-wrap: wrap; }
         button, input[type="file"] { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #333; color: white; border: 1px solid #555; border-radius: 4px; }
         button:hover { background: #555; }
         button:disabled { background: #222; color: #666; cursor: not-allowed; }
-        
         .panel { background: #222; padding: 10px 20px; border-radius: 8px; border: 1px solid #444; display: flex; align-items: center; gap: 10px; }
-        
         #status { margin-top: 15px; font-weight: bold; color: #4CAF50; }
-        #debug-info { margin-top: 5px; font-size: 12px; color: #aaa; }
-
-        #dashboard { 
-            display: none; 
-            justify-content: center; 
-            gap: 40px; 
-            margin-top: 20px; 
-            padding: 15px; 
-            background: #1a1a1a; 
-            border: 1px solid #333;
-            border-radius: 8px;
-            width: fit-content;
-            margin-left: auto; margin-right: auto;
-        }
+        #dashboard { display: none; justify-content: center; gap: 40px; margin-top: 20px; padding: 15px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; width: fit-content; margin-left: auto; margin-right: auto; }
         .dash-section { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-        .dash-title { font-size: 12px; color: #888; letter-spacing: 1px; }
-        
         #vis-palette { display: flex; gap: 2px; }
         .pal-box { width: 24px; height: 24px; border: 1px solid #555; border-radius: 2px; }
-        
-        #vis-eq { 
-            display: flex; gap: 3px; align-items: flex-end; 
-            height: 60px; border-bottom: 2px solid #555; padding-bottom: 2px; 
-            width: 280px; justify-content: center;
-        }
+        #vis-eq { display: flex; gap: 3px; align-items: flex-end; height: 60px; border-bottom: 2px solid #555; padding-bottom: 2px; width: 280px; justify-content: center; }
         .eq-bar { width: 12px; background-color: #00ffcc; border-radius: 2px 2px 0 0; transition: height 0.05s ease-out; }
         .eq-center-divider { width: 2px; height: 10px; background-color: #666; margin: 0 4px; }
+        
+        /* 💡 녹화 버튼 전용 스타일 */
+        #btn-export { background-color: #28a745; font-weight: bold; }
+        #btn-export:hover { background-color: #218838; }
     </style>
 </head>
 <body>
 
-    <h2>MSX2 Universal Player (SCREEN 2)</h2>
+    <h2>MSX2 Universal Player & Recorder</h2>
     
     <div id="screen-wrapper">
         <canvas id="msx-screen" width="256" height="192"></canvas>
@@ -105,6 +49,7 @@
         <input type="file" id="file-input" accept=".mv1,.mv2" />
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
+        <button id="btn-export" disabled>💾 Export MP4</button>
         
         <div class="panel">
             <label for="scale-slider">📺 Size: <span id="scale-label">3x</span></label>
@@ -112,9 +57,7 @@
         </div>
         
         <div class="panel">
-            <label style="cursor: pointer;">
-                <input type="checkbox" id="toggle-dashboard"> 📊 Dash View
-            </label>
+            <label style="cursor: pointer;"><input type="checkbox" id="toggle-dashboard"> 📊 Dash View</label>
         </div>
 
         <div class="panel">
@@ -124,37 +67,33 @@
         </div>
     </div>
     
-    <div id="status">대기 중... MV1 또는 MV2 파일을 선택하세요.</div>
-    <div id="debug-info"></div>
+    <div id="status">대기 중...</div>
 
     <div id="dashboard">
-        <div class="dash-section">
-            <div class="dash-title">PALETTE MEMORY (16 COLORS)</div>
-            <div id="vis-palette"></div>
-        </div>
-        <div class="dash-section">
-            <div class="dash-title">STEREO EQ SPECTRUM (18 BANDS)</div>
-            <div id="vis-eq"></div>
-        </div>
+        <div class="dash-section"><div id="vis-palette"></div></div>
+        <div class="dash-section"><div id="vis-eq"></div></div>
     </div>
 
+    <canvas id="export-canvas" width="256" height="192" style="display:none;"></canvas>
+
 <script>
+const { FFmpeg } = FFmpegWASM;
+const ffmpeg = new FFmpeg();
+
 class MSXMediaDemuxer {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
         this.ctx = this.canvas.getContext('2d');
         this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         this.frames = [];
+        this.audioBuffer = null;
         this.audioSource = null;
+        this.rawAudioBytes = null; // 💡 인코딩용 원본 오디오 바이트 저장
         this.isPlaying = false;
         this.startTime = 0;
         this.pauseTime = 0;
         this.animationId = null;
-        
-        this.format = null;
-        this.fps = 0;
-        this.totalFrames = 0;
-        
+        this.fps = 15;
         this.initDashboard();
     }
 
@@ -165,21 +104,14 @@ class MSXMediaDemuxer {
             d.className = 'pal-box';
             palContainer.appendChild(d);
         }
-        
         const eqContainer = document.getElementById('vis-eq');
-        
-        for (let i = 0; i < 9; i++) {
-            const d = document.createElement('div');
-            d.className = 'eq-bar';
-            d.style.height = '0px';
-            eqContainer.appendChild(d);
-        }
-        
-        const divider = document.createElement('div');
-        divider.className = 'eq-center-divider';
-        eqContainer.appendChild(divider);
-
-        for (let i = 0; i < 9; i++) {
+        for (let i = 0; i < 19; i++) {
+            if(i === 9) {
+                const divider = document.createElement('div');
+                divider.className = 'eq-center-divider';
+                eqContainer.appendChild(divider);
+                continue;
+            }
             const d = document.createElement('div');
             d.className = 'eq-bar';
             d.style.height = '0px';
@@ -190,330 +122,221 @@ class MSXMediaDemuxer {
     reset() {
         this.isPlaying = false;
         cancelAnimationFrame(this.animationId);
-
-        if (this.audioSource) {
-            try { this.audioSource.stop(); } catch (e) {}
-            this.audioSource.disconnect();
-            this.audioSource = null;
-        }
-
+        if (this.audioSource) { try { this.audioSource.stop(); } catch (e) {} this.audioSource.disconnect(); this.audioSource = null; }
         this.frames = [];
         this.audioBuffer = null;
-        this.totalFrames = 0;
-        this.startTime = 0;
-        this.pauseTime = 0;
-
+        this.rawAudioBytes = null;
         this.ctx.fillStyle = "black";
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-
         document.getElementById('btn-play').disabled = true;
         document.getElementById('btn-pause').disabled = true;
-        
-        const eqDivs = document.getElementById('vis-eq').children;
-        for(let i=0; i<eqDivs.length; i++) {
-            if(eqDivs[i].className === 'eq-bar') eqDivs[i].style.height = '0px';
-        }
-
-        // 오버레이 리셋
-        const overlayBars = document.getElementById('eq-overlay').children;
-        for(let i=0; i<overlayBars.length; i++) {
-            overlayBars[i].style.height = '0%';
-        }
+        document.getElementById('btn-export').disabled = true;
     }
 
     async loadFile(file) {
-        this.reset(); 
+        this.reset();
         document.getElementById('status').innerText = "파일 분석 중...";
-        
-        const arrayBuffer = await file.arrayBuffer();
-        const data = new Uint8Array(arrayBuffer);
-        
-        const sigText = String.fromCharCode(...data.slice(0, 8));
-        const versionText = String.fromCharCode(...data.slice(16, 21));
-        
-        const hexDump = Array.from(data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-        document.getElementById('debug-info').innerText = `Header Hex: [${hexDump}] | Sig: [${sigText}] | Ver: [${versionText}]`;
+        const data = new Uint8Array(await file.arrayBuffer());
+        const sig = String.fromCharCode(...data.slice(0, 8));
+        const ver = String.fromCharCode(...data.slice(16, 21));
 
         try {
-            if (sigText === "MMCSD_MV") {
-                if (versionText === "v1.00") {
-                    this.format = "MV1 (Official)";
-                    this.fps = 12;
-                    await this.parseMV1(data);
-                } else if (versionText === "v2.00") {
-                    this.format = "MV2 (Official)";
-                    this.fps = 15;
-                    await this.parseMV2(data, 16384); 
-                } else {
-                    throw new Error(`알 수 없는 공식 버전입니다: ${versionText}`);
-                }
-            } 
-            else if (sigText.startsWith("MV2")) {
-                this.format = "MV2 (Legacy 512B)";
+            if (sig === "MMCSD_MV" && ver === "v2.00") {
                 this.fps = 15;
-                await this.parseMV2(data, 512); 
-            } 
-            else {
-                throw new Error(`지원하지 않는 포맷입니다. (Sig: ${sigText})`);
-            }
+                await this.parseMV2(data, 16384);
+            } else { throw new Error("V2.00 MV2 파일만 지원합니다."); }
             
-            document.getElementById('status').innerText = `[${this.format}] 파싱 완료! (${this.fps} FPS, ${this.totalFrames} 프레임)`;
+            document.getElementById('status').innerText = `파싱 완료! (${this.totalFrames} 프레임)`;
             document.getElementById('btn-play').disabled = false;
+            document.getElementById('btn-export').disabled = false;
         } catch (err) {
             document.getElementById('status').innerText = `에러: ${err.message}`;
-            document.getElementById('status').style.color = "#ff4444";
             console.error(err);
         }
     }
 
-    async parseMV1(data) {
-        this.frames = [];
-        let offset = 16384; 
-        let pcmChunks = [];
-
-        while (offset + 16384 <= data.length) {
-            const pgt = data.slice(offset, offset + 6144);
-            const ct = data.slice(offset + 6144, offset + 12288);
-            const pcm = data.slice(offset + 12288, offset + 13232);
+    async parseMV2(data, headerSize) {
+        let offset = headerSize;
+        let mp3Chunks = [];
+        while (offset < data.length) {
+            if (offset + 16384 > data.length) break;
+            const block = data.subarray(offset, offset + 16384);
+            const pgt = block.slice(0, 6144);
+            const ct = block.slice(6144, 12288);
+            const palette = [[0,0,0]].concat(this.extractPalette(block.slice(12288, 12318), 15));
+            const eqRaw = block.slice(12320, 12330);
+            const sz = block[12800];
+            const mp3 = block.slice(12801, 12801 + (sz * 32));
             
-            const palRaw = data.slice(offset + 13232, offset + 13262); 
-            const palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
-            const eqRaw = new Uint8Array(10); 
-
             this.frames.push({ pgt, ct, palette, eqRaw });
-            pcmChunks.push(pcm);
+            mp3Chunks.push(mp3);
             offset += 16384;
         }
         this.totalFrames = this.frames.length;
-
-        const sampleRate = 944 * 12; 
-        const audioBuffer = this.audioCtx.createBuffer(1, this.totalFrames * 944, sampleRate);
-        const channelData = audioBuffer.getChannelData(0);
         
-        let writeOffset = 0;
-        for (let i = 0; i < pcmChunks.length; i++) {
-            for (let j = 0; j < 944; j++) {
-                channelData[writeOffset++] = (pcmChunks[i][j] - 128) / 128.0;
-            }
-        }
-        this.audioBuffer = audioBuffer;
+        // 오디오 처리
+        const totalLen = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        this.rawAudioBytes = new Uint8Array(totalLen);
+        let aOff = 0;
+        for (let c of mp3Chunks) { this.rawAudioBytes.set(c, aOff); aOff += c.length; }
+        this.audioBuffer = await this.audioCtx.decodeAudioData(this.rawAudioBytes.buffer.slice(0));
     }
 
-    async parseMV2(data, headerSize) {
-        this.frames = [];
-        let offset = headerSize; 
-        let mp3Chunks = [];
-        let isLegacy = (headerSize === 512);
-
-        while (offset < data.length) {
-            const blockSize = isLegacy ? 15872 : 16384;
-            if (offset + blockSize > data.length) break;
-
-            const pgt = data.slice(offset, offset + 6144);
-            const ct = data.slice(offset + 6144, offset + 12288);
-            
-            const palRaw = data.slice(offset + 12288, offset + 12318);
-            const palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
-            
-            const eqRaw = data.slice(offset + 12320, offset + 12330);
-            
-            const sz = data[offset + 12800];
-            const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
-            
-            this.frames.push({ pgt, ct, palette, eqRaw });
-            mp3Chunks.push(mp3Data);
-
-            offset += blockSize;
-            isLegacy = false; 
+    extractPalette(d, count) {
+        const p = [];
+        for (let i = 0; i < count; i++) {
+            const r8 = Math.round(((d[i*2] >> 4) & 0x07) * 255/7);
+            const b8 = Math.round((d[i*2] & 0x07) * 255/7);
+            const g8 = Math.round((d[i*2+1] & 0x07) * 255/7);
+            p.push([r8, g8, b8]);
         }
-        this.totalFrames = this.frames.length;
-
-        const totalMp3Length = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-        const mp3Concat = new Uint8Array(totalMp3Length);
-        let writeOffset = 0;
-        for (let chunk of mp3Chunks) {
-            mp3Concat.set(chunk, writeOffset);
-            writeOffset += chunk.length;
-        }
-        this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
+        return p;
     }
 
-    extractPalette(palData, colorCount) {
-        const pal = [];
-        for (let i = 0; i < colorCount; i++) {
-            if (i * 2 + 1 >= palData.length) break;
-            const r_b = palData[i * 2];     
-            const g = palData[i * 2 + 1];   
-            
-            const r8 = Math.round(((r_b >> 4) & 0x07) * 255 / 7);
-            const b8 = Math.round((r_b & 0x07) * 255 / 7);
-            const g8 = Math.round((g & 0x07) * 255 / 7);
-            pal.push([r8, g8, b8]);
-        }
-        while (pal.length < colorCount) pal.push([0, 0, 0]);
-        return pal;
-    }
-
-    renderFrame(frameIndex) {
-        if (frameIndex >= this.totalFrames) return;
+    // 💡 렌더링 로직 (화면용 또는 내보내기용 대상 캔버스 지정 가능)
+    renderFrameToCanvas(frameIndex, targetCtx, withOverlay = false) {
         const frame = this.frames[frameIndex];
-        const imgData = this.ctx.createImageData(256, 192);
-        const data = imgData.data;
-
+        const img = targetCtx.createImageData(256, 192);
         for (let y = 0; y < 192; y++) {
             for (let cx = 0; cx < 32; cx++) {
-                const off = (Math.floor(y / 8) * 32 + cx) * 8 + (y % 8);
-                const p_byte = frame.pgt[off];
-                const c_byte = frame.ct[off];
-                
-                const fg = (c_byte >> 4) & 0x0F;
-                const bg = c_byte & 0x0F;
-
-                const x_start = cx * 8;
-                for (let p = 0; p < 8; p++) {
-                    const colorIdx = (p_byte & (1 << (7 - p))) !== 0 ? fg : bg;
-                    const rgb = frame.palette[colorIdx] || [0, 0, 0];
-                    
-                    const pxOffset = (y * 256 + (x_start + p)) * 4;
-                    data[pxOffset] = rgb[0];
-                    data[pxOffset + 1] = rgb[1];
-                    data[pxOffset + 2] = rgb[2];
-                    data[pxOffset + 3] = 255;
+                const off = (Math.floor(y/8)*32 + cx)*8 + (y%8);
+                const p = frame.pgt[off], c = frame.ct[off];
+                const fg = c >> 4, bg = c & 0x0F;
+                for (let px = 0; px < 8; px++) {
+                    const color = (p & (1 << (7-px))) ? frame.palette[fg] : frame.palette[bg];
+                    const idx = (y * 256 + (cx * 8 + px)) * 4;
+                    img.data[idx] = color[0]; img.data[idx+1] = color[1]; img.data[idx+2] = color[2]; img.data[idx+3] = 255;
                 }
             }
         }
-        this.ctx.putImageData(imgData, 0, 0);
+        targetCtx.putImageData(img, 0, 0);
 
-        // 하단 대시보드 업데이트
-        if (document.getElementById('toggle-dashboard').checked) {
-            const palDivs = document.getElementById('vis-palette').children;
-            for(let i = 0; i < 16; i++) {
-                const rgb = frame.palette[i] || [0, 0, 0];
-                palDivs[i].style.backgroundColor = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-            }
-            
-            const eqDivs = document.getElementById('vis-eq').children;
-            for(let i = 0; i < 9; i++) {
-                const rawVal = frame.eqRaw[i] !== undefined ? frame.eqRaw[i] : 15;
-                const realVal = 15 - Math.min(rawVal, 15); 
-                const heightPx = (realVal / 15.0) * 60; 
-                
-                eqDivs[i].style.height = `${heightPx}px`;
-                eqDivs[18 - i].style.height = `${heightPx}px`;
+        // 💡 오버레이 EQ를 캔버스에 직접 그리기 (Export용)
+        if (withOverlay) {
+            const opacity = document.getElementById('overlay-opacity').value;
+            targetCtx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+            const eqWidth = 256 * 0.25;
+            const eqHeight = 192 * 0.25;
+            const barW = (eqWidth / 9) - 1;
+            for (let i = 0; i < 9; i++) {
+                const val = 15 - Math.min(frame.eqRaw[i], 15);
+                const h = (val / 15) * (eqHeight * 0.9);
+                targetCtx.fillRect(2 + i * (barW + 1), eqHeight - h + 2, barW, Math.max(1, h));
             }
         }
+    }
 
-        // 💡 추가: 오버레이 EQ 업데이트
+    renderFrame(idx) {
+        this.renderFrameToCanvas(idx, this.ctx, false);
+        // 대시보드 및 DOM 오버레이 업데이트 (기존 코드 유지)
+        const frame = this.frames[idx];
         const eqOverlay = document.getElementById('eq-overlay');
         if (eqOverlay.style.display !== 'none') {
-            const overlayBars = eqOverlay.children;
-            for(let i = 0; i < 9; i++) {
-                const rawVal = frame.eqRaw[i] !== undefined ? frame.eqRaw[i] : 15;
-                const realVal = 15 - Math.min(rawVal, 15); 
-                
-                // 오버레이는 픽셀(px)이 아닌 퍼센트(%)로 높이를 설정하여 해상도 비율에 유연하게 대응합니다.
-                const heightPct = (realVal / 15.0) * 100; 
-                overlayBars[i].style.height = `${heightPct}%`;
-            }
+            const bars = eqOverlay.children;
+            for(let i=0; i<9; i++) bars[i].style.height = `${((15 - Math.min(frame.eqRaw[i], 15))/15)*100}%`;
         }
     }
 
     play() {
         if (this.isPlaying) return;
         if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
-
         this.audioSource = this.audioCtx.createBufferSource();
         this.audioSource.buffer = this.audioBuffer;
         this.audioSource.connect(this.audioCtx.destination);
-        
         this.audioSource.start(0, this.pauseTime);
         this.startTime = this.audioCtx.currentTime - this.pauseTime;
         this.isPlaying = true;
-
         document.getElementById('btn-play').disabled = true;
         document.getElementById('btn-pause').disabled = false;
-
         const loop = () => {
             if (!this.isPlaying) return;
-            
-            const currentTime = this.audioCtx.currentTime - this.startTime;
-            const currentFrame = Math.floor(currentTime * this.fps);
-            
-            if (currentFrame < this.totalFrames) {
-                this.renderFrame(currentFrame);
-                this.animationId = requestAnimationFrame(loop);
-            } else {
-                this.pause(); 
-            }
+            const currentFrame = Math.floor((this.audioCtx.currentTime - this.startTime) * this.fps);
+            if (currentFrame < this.totalFrames) { this.renderFrame(currentFrame); this.animationId = requestAnimationFrame(loop); }
+            else { this.pause(); }
         };
         loop();
     }
 
     pause() {
-        if (!this.isPlaying) return;
         this.isPlaying = false;
-        
-        if (this.audioSource) {
-            this.audioSource.stop();
-        }
-        
+        if (this.audioSource) this.audioSource.stop();
         this.pauseTime = this.audioCtx.currentTime - this.startTime;
         cancelAnimationFrame(this.animationId);
-
         document.getElementById('btn-play').disabled = false;
         document.getElementById('btn-pause').disabled = true;
+    }
+
+    // 💡 MP4 내보내기 핵심 함수
+    async exportMP4() {
+        const btn = document.getElementById('btn-export');
+        btn.disabled = true;
+        document.getElementById('status').innerText = "준비 중...";
+
+        if (!ffmpeg.loaded) {
+            await ffmpeg.load({ coreURL: 'ffmpeg-core.js', wasmURL: 'ffmpeg-core.wasm' });
+        }
+
+        const exportCanvas = document.getElementById('export-canvas');
+        const exportCtx = exportCanvas.getContext('2d');
+        const videoData = new Uint8Array(this.totalFrames * 256 * 192 * 3);
+        let offset = 0;
+
+        for (let i = 0; i < this.totalFrames; i++) {
+            this.renderFrameToCanvas(i, exportCtx, true); // EQ 포함 렌더링
+            const pixels = exportCtx.getImageData(0, 0, 256, 192).data;
+            for (let j = 0; j < pixels.length; j += 4) {
+                videoData[offset++] = pixels[j];
+                videoData[offset++] = pixels[j+1];
+                videoData[offset++] = pixels[j+2];
+            }
+            if (i % 50 === 0) document.getElementById('status').innerText = `프레임 합성 중... (${i}/${this.totalFrames})`;
+        }
+
+        await ffmpeg.writeFile('video.raw', videoData);
+        await ffmpeg.writeFile('audio.mp3', this.rawAudioBytes);
+
+        document.getElementById('status').innerText = "MP4 인코딩 중...";
+        await ffmpeg.exec(['-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '256x192', '-r', '15', '-i', 'video.raw', '-i', 'audio.mp3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-shortest', 'output.mp4']);
+
+        const data = await ffmpeg.readFile('output.mp4');
+        const url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "msx_play_result.mp4";
+        a.click();
+
+        document.getElementById('status').innerText = "내보내기 완료!";
+        btn.disabled = false;
     }
 }
 
 const player = new MSXMediaDemuxer('msx-screen');
-
-document.getElementById('file-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    document.getElementById('status').style.color = "#4CAF50"; 
-    await player.loadFile(file);
-});
-
+document.getElementById('file-input').addEventListener('change', e => player.loadFile(e.target.files[0]));
 document.getElementById('btn-play').addEventListener('click', () => player.play());
 document.getElementById('btn-pause').addEventListener('click', () => player.pause());
+document.getElementById('btn-export').addEventListener('click', () => player.exportMP4());
 
-document.getElementById('scale-slider').addEventListener('input', (e) => {
-    const scale = parseInt(e.target.value, 10);
-    const canvas = document.getElementById('msx-screen');
-    document.getElementById('scale-label').innerText = `${scale}x`;
-    
-    canvas.style.width = `${256 * scale}px`;
-    canvas.style.height = `${192 * scale}px`;
+document.getElementById('scale-slider').addEventListener('input', e => {
+    const s = e.target.value;
+    document.getElementById('scale-label').innerText = s + 'x';
+    document.getElementById('msx-screen').style.width = (256 * s) + 'px';
+    document.getElementById('msx-screen').style.height = (192 * s) + 'px';
 });
 
-document.getElementById('toggle-dashboard').addEventListener('change', (e) => {
-    const dash = document.getElementById('dashboard');
-    dash.style.display = e.target.checked ? 'flex' : 'none';
+document.getElementById('toggle-overlay-btn').addEventListener('click', e => {
+    const o = document.getElementById('eq-overlay');
+    const isOff = o.style.display === 'none';
+    o.style.display = isOff ? 'flex' : 'none';
+    e.target.innerText = isOff ? 'Overlay OFF' : 'Overlay ON';
+    e.target.style.backgroundColor = isOff ? '#d9534f' : '#333';
 });
 
-// 💡 추가: 오버레이 토글 및 투명도 이벤트 리스너
-document.getElementById('toggle-overlay-btn').addEventListener('click', (e) => {
-    const overlay = document.getElementById('eq-overlay');
-    if (overlay.style.display === 'none') {
-        overlay.style.display = 'flex';
-        e.target.innerText = 'Overlay OFF';
-        e.target.style.backgroundColor = '#d9534f'; // 켜졌을 때 붉은 톤으로 변경
-    } else {
-        overlay.style.display = 'none';
-        e.target.innerText = 'Overlay ON';
-        e.target.style.backgroundColor = '#333';
-    }
-});
-
-document.getElementById('overlay-opacity').addEventListener('input', (e) => {
+document.getElementById('overlay-opacity').addEventListener('input', e => {
     const alpha = e.target.value;
-    document.getElementById('opacity-label').innerText = `${Math.round(alpha * 100)}%`;
-    const overlayBars = document.getElementsByClassName('overlay-eq-bar');
-    for(let i = 0; i < overlayBars.length; i++) {
-        overlayBars[i].style.backgroundColor = `rgba(255, 255, 255, ${alpha})`;
-    }
+    document.getElementById('opacity-label').innerText = Math.round(alpha * 100) + '%';
+    const bars = document.getElementsByClassName('overlay-eq-bar');
+    for(let b of bars) b.style.backgroundColor = `rgba(255, 255, 255, ${alpha})`;
 });
-
 </script>
 </body>
 </html>
