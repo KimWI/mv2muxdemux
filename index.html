@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>MSX MV2 to MP4 Web Demuxer</title>
+    <title>MSX MV2 to MP4 (ALAC & EQ Overlay) Web Demuxer</title>
     <style>
         body { font-family: -apple-system, sans-serif; background: #1e1e1e; color: #fff; padding: 40px; max-width: 1200px; margin: 0 auto; text-align: center; }
         .box { background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); text-align: left; }
@@ -12,32 +12,27 @@
         pre { background: #000; padding: 15px; border-radius: 4px; overflow-y: auto; max-height: 200px; color: #00ff00; font-family: monospace; }
         #downloadBtn { display: inline-block; background: #28a745; text-decoration: none; color: white; padding: 10px 20px; border-radius: 4px; display: none; margin-top: 10px; }
         
-        /* 💡 비디오 플레이어 및 도트 픽셀 유지 스타일 */
         #playerArea { margin-top: 30px; display: none; }
         
-        /* 비디오와 오버레이 버튼을 묶어주는 래퍼 */
         .player-wrapper {
             position: relative;
-            display: inline-block; /* 비디오 크기에 맞춰 래퍼 크기 자동 조절 */
+            display: inline-block;
             box-shadow: 0 4px 15px rgba(0,0,0,0.8); 
         }
 
         #player { 
             background: #000; 
             display: block;
-            /* 화면이 부드럽게 커지도록 애니메이션 효과 */
             transition: width 0.3s ease, height 0.3s ease; 
-            /* 💡 핵심: 레트로 픽셀이 뭉개지지 않고 선명하게 확대되게 함 */
             image-rendering: pixelated; 
         }
         
         .scale-btn { background: #444; font-size: 14px; padding: 6px 15px; }
         .scale-btn:hover { background: #666; }
 
-        /* 💡 글래스모피즘 스타일 Unmute 버튼 (우측 상단 배치) */
         .unmute-btn {
             position: absolute;
-            top: 20px; /* 하단 컨트롤 바와 겹치지 않도록 상단으로 이동 */
+            top: 20px;
             right: 20px;
             padding: 10px 16px;
             background: rgba(0, 0, 0, 0.4); 
@@ -62,7 +57,6 @@
             transform: scale(1.05);
         }
 
-        /* 소리 켜기 후 부드럽게 사라지는 효과 */
         .fade-out {
             opacity: 0;
             visibility: hidden;
@@ -70,16 +64,17 @@
         }
     </style>
     
-    <script src="ffmpeg.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.7/dist/umd/ffmpeg.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.4/dist/umd/ffmpeg-core.js"></script>
 </head>
 <body>
 
-    <h1>🎬 MSX MV2 Web Demuxer & Player</h1>
+    <h1>🎬 MSX MV2 Web Demuxer (ALAC + EQ Overlay)</h1>
     <div class="box">
         <input type="file" id="mv2file" accept=".MV2,.mv2" />
         <br>
         <button id="startBtn">변환 및 재생 시작</button>
-        <a id="downloadBtn" download="output.mp4">↓ MP4 저장하기</a>
+        <a id="downloadBtn" download="output.mp4">↓ MP4(ALAC) 저장하기</a>
     </div>
 
     <div id="playerArea">
@@ -91,15 +86,7 @@
         <br>
         <div class="player-wrapper">
             <video id="player" controls autoplay muted playsinline></video>
-            
-            <button id="unmuteBtn" class="unmute-btn">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                    <line x1="23" y1="9" x2="17" y2="15"></line>
-                    <line x1="17" y1="9" x2="23" y2="15"></line>
-                </svg>
-                소리 켜기
-            </button>
+            <button id="unmuteBtn" class="unmute-btn">소리 켜기</button>
         </div>
     </div>
 
@@ -107,6 +94,8 @@
         <h3>진행 상황 로그</h3>
         <pre id="log">대기 중...</pre>
     </div>
+
+    <canvas id="renderCanvas" width="256" height="192" style="display:none;"></canvas>
 
     <script>
         const { FFmpeg } = FFmpegWASM;
@@ -117,15 +106,15 @@
         const playerArea = document.getElementById('playerArea');
         const player = document.getElementById('player');
         const unmuteBtn = document.getElementById('unmuteBtn');
+        const renderCanvas = document.getElementById('renderCanvas');
+        const ctx = renderCanvas.getContext('2d', { willReadFrequently: true });
 
-        // Unmute 버튼 클릭 이벤트 처리
         unmuteBtn.addEventListener('click', () => {
             player.muted = false;
             player.play().catch(e => console.error("재생 에러:", e));
             unmuteBtn.classList.add('fade-out');
         });
 
-        // 스케일 조절 버튼 이벤트 연결
         document.getElementById('btn1x').addEventListener('click', () => setPlayerSize(256, 192));
         document.getElementById('btn2x').addEventListener('click', () => setPlayerSize(512, 384));
         document.getElementById('btn4x').addEventListener('click', () => setPlayerSize(1024, 768));
@@ -149,24 +138,21 @@
             return [Math.floor(r * 255 / 7), Math.floor(g * 255 / 7), Math.floor(b * 255 / 7)];
         }
 
+        // 💡 수정된 demux 함수: EQ 데이터도 함께 추출합니다.
         async function demuxMV2(arrayBuffer) {
             const data = new Uint8Array(arrayBuffer);
             const blockSize = 16384;
-            /* let remainingBytes = data.length - 512; */
-            /* let numBlocks = remainingBytes >= 15872 ? 1 + Math.floor((remainingBytes - 15872) / 16384) : 0; */
             let remainingBytes = data.length - blockSize;
             let numBlocks = 1 + Math.floor(remainingBytes / 16384);
 
-            const videoBuffer = new Uint8Array(numBlocks * 256 * 192 * 3);
-            let videoOffset = 0;
+            const frames = []; // 프레임 단위 데이터(픽셀 + EQ) 저장 배열
             let audioChunks = [];
             let palette = Array(16).fill([0, 0, 0]);
 
-            let pos = 16384;
+            let pos = 16384; // 첫 번째 16KB 헤더 건너뜀
             let count = 0;
 
             while (pos < data.length) {
-                /* let currentBlockSize = (count === 0) ? 15872 : 16384; */
                 let currentBlockSize = 16384;
                 if (pos + currentBlockSize > data.length) break;
 
@@ -175,12 +161,16 @@
 
                 if (block.length < 12318) break;
 
+                // 1. 팔레트 추출
                 for (let i = 0; i < 15; i++) {
                     let b1 = block[12288 + i * 2], b2 = block[12288 + i * 2 + 1];
                     let r = (b1 >> 4) & 0x07, b = b1 & 0x07, g = b2 & 0x07;
                     palette[i + 1] = rgb333_to_888(r, g, b);
                 }
 
+                // 2. 비디오 픽셀 추출
+                let framePixels = new Uint8Array(256 * 192 * 3);
+                let pOffset = 0;
                 for (let y = 0; y < 192; y++) {
                     for (let x = 0; x < 256; x++) {
                         let b_idx = Math.floor(y / 8) * 32 + Math.floor(x / 8);
@@ -191,12 +181,22 @@
                         let isFg = (p_byte & (1 << (7 - (x % 8)))) !== 0;
                         let color = isFg ? palette[fg] : palette[bg];
 
-                        videoBuffer[videoOffset++] = color[0];
-                        videoBuffer[videoOffset++] = color[1];
-                        videoBuffer[videoOffset++] = color[2];
+                        framePixels[pOffset++] = color[0];
+                        framePixels[pOffset++] = color[1];
+                        framePixels[pOffset++] = color[2];
                     }
                 }
 
+                // 💡 3. EQ 데이터 추출 (오프셋 12320에서 9바이트)
+                let eqData = new Uint8Array(9);
+                for(let i=0; i<9; i++) {
+                    // 값 반전 복원 로직 포함 (0이 최소, 15가 최대 높이가 되도록)
+                    eqData[i] = 15 - Math.min(block[12320 + i], 15);
+                }
+
+                frames.push({ pixels: framePixels, eq: eqData });
+
+                // 4. 오디오 추출
                 if (block.length > 12800) {
                     let sizeIndicator = block[12800];
                     if (sizeIndicator > 0 && sizeIndicator <= 128) {
@@ -206,7 +206,8 @@
                         }
                     }
                 }
-                if (count % 100 === 0) log(`프레임 파싱 중... ${count}/${numBlocks}`);
+                
+                if (count % 100 === 0) log(`MV2 파싱 중... ${count}/${numBlocks}`);
                 count++;
             }
 
@@ -218,7 +219,66 @@
                 aOff += chunk.length;
             }
 
-            return { videoBuffer: videoBuffer.subarray(0, videoOffset), audioBuffer };
+            return { frames, audioBuffer };
+        }
+
+        // 💡 캔버스에 비디오 픽셀과 반투명 EQ를 합성하여 최종 Raw 스트림 생성
+        function generateVideoWithEQ(frames) {
+            const numFrames = frames.length;
+            // 256 * 192 * 3 (RGB) 바이트 배열
+            const finalVideoBuffer = new Uint8Array(numFrames * 256 * 192 * 3);
+            let offset = 0;
+
+            // 오버레이 설정 (가로세로 1/4 크기 = 면적 1/16, 좌상단 배치)
+            const eqWidth = 256 * 0.25;  // 64px
+            const eqHeight = 192 * 0.25; // 48px
+            const maxBarHeight = eqHeight * 0.9; // 패딩 여유분
+            const barWidth = Math.floor(eqWidth / 9) - 1;
+
+            log(`캔버스에 오버레이 합성 중... 총 ${numFrames} 프레임`);
+
+            for (let f = 0; f < numFrames; f++) {
+                const frameData = frames[f];
+                
+                // 1. 픽셀 데이터를 캔버스 이미지 데이터로 변환
+                const imgData = ctx.createImageData(256, 192);
+                let pIdx = 0;
+                for (let i = 0; i < frameData.pixels.length; i += 3) {
+                    imgData.data[pIdx++] = frameData.pixels[i];     // R
+                    imgData.data[pIdx++] = frameData.pixels[i+1];   // G
+                    imgData.data[pIdx++] = frameData.pixels[i+2];   // B
+                    imgData.data[pIdx++] = 255;                     // A (불투명)
+                }
+                
+                // 2. 캔버스에 비디오 프레임 렌더링
+                ctx.putImageData(imgData, 0, 0);
+
+                // 3. EQ 오버레이 그리기 (20% 백색 반투명)
+                ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
+                for (let b = 0; b < 9; b++) {
+                    const eqVal = frameData.eq[b]; // 0 ~ 15
+                    const height = (eqVal / 15.0) * maxBarHeight;
+                    
+                    // 하단 정렬을 위한 Y 좌표 계산 (여백 2px 추가)
+                    const x = 2 + b * (barWidth + 1);
+                    const y = eqHeight - height + 2; 
+                    
+                    // 최소 높이 1px 보장
+                    ctx.fillRect(x, y, barWidth, Math.max(1, height));
+                }
+
+                // 4. 합성된 캔버스 픽셀을 다시 Raw RGB 배열로 추출
+                const compositedData = ctx.getImageData(0, 0, 256, 192).data;
+                for (let i = 0; i < compositedData.length; i += 4) {
+                    finalVideoBuffer[offset++] = compositedData[i];     // R
+                    finalVideoBuffer[offset++] = compositedData[i+1];   // G
+                    finalVideoBuffer[offset++] = compositedData[i+2];   // B
+                }
+                
+                if (f % 100 === 0) log(`합성 진행률: ${Math.round((f/numFrames)*100)}%`);
+            }
+            
+            return finalVideoBuffer;
         }
 
         startBtn.addEventListener('click', async () => {
@@ -231,33 +291,36 @@
             downloadBtn.style.display = "none";
             playerArea.style.display = "none";
             
-            // 변환 재시작 시 플레이어 및 버튼 상태 초기화
             player.pause();
             player.muted = true; 
             unmuteBtn.classList.remove('fade-out');
             
-            logEl.textContent = "변환 시작...";
+            logEl.textContent = "변환 준비 중...";
 
             try {
                 const file = fileInput.files[0];
                 const arrayBuffer = await file.arrayBuffer();
 
-                log("1. MV2 파일 파싱 및 Raw 데이터 추출 중...");
-                const { videoBuffer, audioBuffer } = await demuxMV2(arrayBuffer);
+                log("1. MV2 파일 파싱 및 데이터 추출 중...");
+                const { frames, audioBuffer } = await demuxMV2(arrayBuffer);
 
-                log("2. FFmpeg.wasm 로컬 엔진 로딩 중...");
+                log("2. 비디오 프레임에 EQ 오버레이 합성 중...");
+                const videoBuffer = generateVideoWithEQ(frames);
+
+                log("3. FFmpeg.wasm 로드 중...");
                 if (!ffmpeg.loaded) {
                     await ffmpeg.load({
-                        coreURL: 'ffmpeg-core.js',
-                        wasmURL: 'ffmpeg-core.wasm'
+                        coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.4/dist/umd/ffmpeg-core.js',
+                        wasmURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.4/dist/umd/ffmpeg-core.wasm'
                     });
                 }
 
-                log("3. 브라우저 가상 메모리(MEMFS)에 기록 중...");
+                log("4. 가상 파일 시스템(MEMFS)에 기록 중...");
                 await ffmpeg.writeFile('video.raw', videoBuffer);
-                await ffmpeg.writeFile('audio.mp3', audioBuffer);
+                await ffmpeg.writeFile('audio.mp3', audioBuffer); // 추출된 원본 오디오
 
-                log("4. Muxing 시작 (MP4 결합)...");
+                log("5. Muxing 및 ALAC 오디오 인코딩 시작...");
+                // 💡 오디오 코덱을 alac으로 지정하여 변환
                 await ffmpeg.exec([
                     '-y',
                     '-f', 'rawvideo',
@@ -268,27 +331,25 @@
                     '-i', 'audio.mp3',
                     '-c:v', 'libx264',
                     '-pix_fmt', 'yuv420p',
-                    '-c:a', 'copy',
+                    '-c:a', 'alac', // MP3 -> ALAC 무손실 변환
                     '-shortest',
-                    'output.mp4'
+                    'output.mp4' // ALAC은 MP4/M4A 컨테이너에서 정상 작동
                 ]);
 
-                log("5. 변환 완료! 웹 플레이어에서 재생을 시작합니다.");
+                log("6. 변환 완료! 재생 및 다운로드를 준비합니다.");
                 
                 const data = await ffmpeg.readFile('output.mp4');
                 const blob = new Blob([data.buffer], { type: 'video/mp4' });
                 const url = URL.createObjectURL(blob);
                 
-                // 플레이어 표시 및 자동 재생 (기본 2x 크기로 설정)
                 player.src = url;
                 setPlayerSize(512, 384);  
                 playerArea.style.display = "block";
                 
-                // Safari/Chrome 정책에 맞춰 muted 상태로 먼저 재생
                 player.play().catch(e => log(`자동 재생 정책 차단: ${e}`));
                 
                 downloadBtn.href = url;
-                downloadBtn.download = file.name.replace(/\.[^/.]+$/, "") + ".mp4";
+                downloadBtn.download = file.name.replace(/\.[^/.]+$/, "") + "_alac_eq.mp4";
                 downloadBtn.style.display = "inline-block";
                 
                 ffmpeg.deleteFile('video.raw');
