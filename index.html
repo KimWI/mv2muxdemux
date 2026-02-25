@@ -3,15 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <title>MSX MV2 to MP4 (ALAC & EQ Overlay) Web Demuxer</title>
-    <script src="coi-serviceworker.js"></script>
     <style>
         body { font-family: -apple-system, sans-serif; background: #1e1e1e; color: #fff; padding: 40px; max-width: 1200px; margin: 0 auto; text-align: center; }
         .box { background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); text-align: left; }
-        button { background: #0078D7; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-top: 10px; margin-right: 5px; }
-        button:hover { background: #005a9e; }
-        button:disabled { background: #555; cursor: not-allowed; }
+        
+        /* 버튼 스타일 세분화 */
+        button { color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 15px; margin: 5px; transition: background 0.2s; }
+        button:disabled { background: #555 !important; cursor: not-allowed; }
+        
+        .btn-primary { background: #0078D7; }
+        .btn-primary:hover { background: #005a9e; }
+        
+        .btn-play { background: #E50914; }
+        .btn-play:hover { background: #b20710; }
+        
+        .btn-down { background: #28a745; text-decoration: none; display: inline-block; }
+        .btn-down:hover { background: #1e7e34; }
+
         pre { background: #000; padding: 15px; border-radius: 4px; overflow-y: auto; max-height: 200px; color: #00ff00; font-family: monospace; }
-        #downloadBtn { display: inline-block; background: #28a745; text-decoration: none; color: white; padding: 10px 20px; border-radius: 4px; display: none; margin-top: 10px; }
         
         #playerArea { margin-top: 30px; display: none; }
         
@@ -19,75 +28,74 @@
             position: relative;
             display: inline-block;
             box-shadow: 0 4px 15px rgba(0,0,0,0.8); 
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            padding: 10px;
         }
 
-        #player { 
-            background: #000; 
+        #videoPlayer { 
             display: block;
             transition: width 0.3s ease, height 0.3s ease; 
             image-rendering: pixelated; 
         }
         
-        .scale-btn { background: #444; font-size: 14px; padding: 6px 15px; }
+        /* 💡 추가: 오디오 전용 플레이어 스타일 */
+        #audioPlayer {
+            display: none; /* 초기에는 숨김 */
+            width: 512px;
+            margin-top: 20px;
+        }
+
+        .scale-btn { background: #444; font-size: 13px; padding: 6px 12px; }
         .scale-btn:hover { background: #666; }
 
-        .unmute-btn {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            padding: 10px 16px;
-            background: rgba(0, 0, 0, 0.4); 
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            border-radius: 20px;
-            color: white;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            transition: all 0.3s ease;
-            z-index: 10;
-            margin: 0;
-        }
-
-        .unmute-btn:hover {
-            background: rgba(255, 255, 255, 0.2);
-            transform: scale(1.05);
-        }
-
-        .fade-out {
-            opacity: 0;
-            visibility: hidden;
-            transform: scale(0.9);
+        #resultActions {
+            display: none; /* 변환 완료 후 표시됨 */
+            margin-top: 20px;
+            padding: 15px;
+            background: #333;
+            border-radius: 8px;
+            text-align: center;
         }
     </style>
     
+    <script src="coi-serviceworker.min.js"></script>
+    
     <script src="ffmpeg.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.4/dist/umd/ffmpeg-core.js"></script>
 </head>
 <body>
 
-    <h1>🎬 MSX MV2 Web Demuxer (ALAC + EQ Overlay)</h1>
+    <h1>🎬 MSX MV2 Web Demuxer (MP4 & MP3)</h1>
+    
     <div class="box">
         <input type="file" id="mv2file" accept=".MV2,.mv2" />
-        <br>
-        <button id="startBtn">변환 및 재생 시작</button>
-        <a id="downloadBtn" download="output.mp4">↓ MP4(ALAC) 저장하기</a>
+        <br><br>
+        <button id="startBtn" class="btn-primary">▶ 변환 및 추출 시작</button>
+    </div>
+
+    <div id="resultActions">
+        <h3>✅ 변환 완료! 원하는 작업을 선택하세요</h3>
+        <div>
+            <button id="playVidBtn" class="btn-play">🎬 비디오(MP4) 화면 재생</button>
+            <button id="playAudBtn" class="btn-play">🎵 오디오(MP3) 단독 재생</button>
+        </div>
+        <div style="margin-top: 10px;">
+            <a id="downVidBtn" class="btn-down">↓ MP4(비디오) 저장</a>
+            <a id="downAudBtn" class="btn-down">↓ MP3(오디오) 저장</a>
+        </div>
     </div>
 
     <div id="playerArea">
-        <div>
+        <div id="scaleControls" style="margin-bottom: 10px;">
             <button class="scale-btn" id="btn1x">1x (256x192)</button>
             <button class="scale-btn" id="btn2x">2x (512x384)</button>
             <button class="scale-btn" id="btn4x">4x (1024x768)</button>
         </div>
-        <br>
+        
         <div class="player-wrapper">
-            <video id="player" controls autoplay muted playsinline></video>
-            <button id="unmuteBtn" class="unmute-btn">소리 켜기</button>
+            <video id="videoPlayer" controls playsinline></video>
+            <audio id="audioPlayer" controls></audio>
         </div>
     </div>
 
@@ -101,28 +109,32 @@
     <script>
         const { FFmpeg } = FFmpegWASM;
         const ffmpeg = new FFmpeg();
+        
+        // DOM 요소 캐싱
         const logEl = document.getElementById('log');
         const startBtn = document.getElementById('startBtn');
-        const downloadBtn = document.getElementById('downloadBtn');
+        const resultActions = document.getElementById('resultActions');
         const playerArea = document.getElementById('playerArea');
-        const player = document.getElementById('player');
-        const unmuteBtn = document.getElementById('unmuteBtn');
+        const videoPlayer = document.getElementById('videoPlayer');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const scaleControls = document.getElementById('scaleControls');
+        
+        const playVidBtn = document.getElementById('playVidBtn');
+        const playAudBtn = document.getElementById('playAudBtn');
+        const downVidBtn = document.getElementById('downVidBtn');
+        const downAudBtn = document.getElementById('downAudBtn');
+        
         const renderCanvas = document.getElementById('renderCanvas');
         const ctx = renderCanvas.getContext('2d', { willReadFrequently: true });
 
-        unmuteBtn.addEventListener('click', () => {
-            player.muted = false;
-            player.play().catch(e => console.error("재생 에러:", e));
-            unmuteBtn.classList.add('fade-out');
-        });
-
+        // 스케일 조절 기능 (비디오 재생 시에만 유효)
         document.getElementById('btn1x').addEventListener('click', () => setPlayerSize(256, 192));
         document.getElementById('btn2x').addEventListener('click', () => setPlayerSize(512, 384));
         document.getElementById('btn4x').addEventListener('click', () => setPlayerSize(1024, 768));
 
         function setPlayerSize(w, h) {
-            player.style.width = w + 'px';
-            player.style.height = h + 'px';
+            videoPlayer.style.width = w + 'px';
+            videoPlayer.style.height = h + 'px';
         }
 
         function log(msg) {
@@ -139,18 +151,18 @@
             return [Math.floor(r * 255 / 7), Math.floor(g * 255 / 7), Math.floor(b * 255 / 7)];
         }
 
-        // 💡 수정된 demux 함수: EQ 데이터도 함께 추출합니다.
+        // MV2 파일 분해 (비디오 프레임 + 오디오 청크 추출)
         async function demuxMV2(arrayBuffer) {
             const data = new Uint8Array(arrayBuffer);
             const blockSize = 16384;
             let remainingBytes = data.length - blockSize;
             let numBlocks = 1 + Math.floor(remainingBytes / 16384);
 
-            const frames = []; // 프레임 단위 데이터(픽셀 + EQ) 저장 배열
+            const frames = []; 
             let audioChunks = [];
             let palette = Array(16).fill([0, 0, 0]);
 
-            let pos = 16384; // 첫 번째 16KB 헤더 건너뜀
+            let pos = 16384; 
             let count = 0;
 
             while (pos < data.length) {
@@ -162,14 +174,12 @@
 
                 if (block.length < 12318) break;
 
-                // 1. 팔레트 추출
                 for (let i = 0; i < 15; i++) {
                     let b1 = block[12288 + i * 2], b2 = block[12288 + i * 2 + 1];
                     let r = (b1 >> 4) & 0x07, b = b1 & 0x07, g = b2 & 0x07;
                     palette[i + 1] = rgb333_to_888(r, g, b);
                 }
 
-                // 2. 비디오 픽셀 추출
                 let framePixels = new Uint8Array(256 * 192 * 3);
                 let pOffset = 0;
                 for (let y = 0; y < 192; y++) {
@@ -188,16 +198,13 @@
                     }
                 }
 
-                // 💡 3. EQ 데이터 추출 (오프셋 12320에서 9바이트)
                 let eqData = new Uint8Array(9);
                 for(let i=0; i<9; i++) {
-                    // 값 반전 복원 로직 포함 (0이 최소, 15가 최대 높이가 되도록)
                     eqData[i] = 15 - Math.min(block[12320 + i], 15);
                 }
 
                 frames.push({ pixels: framePixels, eq: eqData });
 
-                // 4. 오디오 추출
                 if (block.length > 12800) {
                     let sizeIndicator = block[12800];
                     if (sizeIndicator > 0 && sizeIndicator <= 128) {
@@ -223,17 +230,15 @@
             return { frames, audioBuffer };
         }
 
-        // 💡 캔버스에 비디오 픽셀과 반투명 EQ를 합성하여 최종 Raw 스트림 생성
+        // 비디오 + 반투명 EQ 오버레이 캔버스 합성
         function generateVideoWithEQ(frames) {
             const numFrames = frames.length;
-            // 256 * 192 * 3 (RGB) 바이트 배열
             const finalVideoBuffer = new Uint8Array(numFrames * 256 * 192 * 3);
             let offset = 0;
 
-            // 오버레이 설정 (가로세로 1/4 크기 = 면적 1/16, 좌상단 배치)
-            const eqWidth = 256 * 0.25;  // 64px
-            const eqHeight = 192 * 0.25; // 48px
-            const maxBarHeight = eqHeight * 0.9; // 패딩 여유분
+            const eqWidth = 256 * 0.25;  
+            const eqHeight = 192 * 0.25; 
+            const maxBarHeight = eqHeight * 0.9; 
             const barWidth = Math.floor(eqWidth / 9) - 1;
 
             log(`캔버스에 오버레이 합성 중... 총 ${numFrames} 프레임`);
@@ -241,39 +246,31 @@
             for (let f = 0; f < numFrames; f++) {
                 const frameData = frames[f];
                 
-                // 1. 픽셀 데이터를 캔버스 이미지 데이터로 변환
                 const imgData = ctx.createImageData(256, 192);
                 let pIdx = 0;
                 for (let i = 0; i < frameData.pixels.length; i += 3) {
-                    imgData.data[pIdx++] = frameData.pixels[i];     // R
-                    imgData.data[pIdx++] = frameData.pixels[i+1];   // G
-                    imgData.data[pIdx++] = frameData.pixels[i+2];   // B
-                    imgData.data[pIdx++] = 255;                     // A (불투명)
+                    imgData.data[pIdx++] = frameData.pixels[i];     
+                    imgData.data[pIdx++] = frameData.pixels[i+1];   
+                    imgData.data[pIdx++] = frameData.pixels[i+2];   
+                    imgData.data[pIdx++] = 255;                     
                 }
                 
-                // 2. 캔버스에 비디오 프레임 렌더링
                 ctx.putImageData(imgData, 0, 0);
 
-                // 3. EQ 오버레이 그리기 (20% 백색 반투명)
                 ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
                 for (let b = 0; b < 9; b++) {
-                    const eqVal = frameData.eq[b]; // 0 ~ 15
+                    const eqVal = frameData.eq[b]; 
                     const height = (eqVal / 15.0) * maxBarHeight;
-                    
-                    // 하단 정렬을 위한 Y 좌표 계산 (여백 2px 추가)
                     const x = 2 + b * (barWidth + 1);
                     const y = eqHeight - height + 2; 
-                    
-                    // 최소 높이 1px 보장
                     ctx.fillRect(x, y, barWidth, Math.max(1, height));
                 }
 
-                // 4. 합성된 캔버스 픽셀을 다시 Raw RGB 배열로 추출
                 const compositedData = ctx.getImageData(0, 0, 256, 192).data;
                 for (let i = 0; i < compositedData.length; i += 4) {
-                    finalVideoBuffer[offset++] = compositedData[i];     // R
-                    finalVideoBuffer[offset++] = compositedData[i+1];   // G
-                    finalVideoBuffer[offset++] = compositedData[i+2];   // B
+                    finalVideoBuffer[offset++] = compositedData[i];     
+                    finalVideoBuffer[offset++] = compositedData[i+1];   
+                    finalVideoBuffer[offset++] = compositedData[i+2];   
                 }
                 
                 if (f % 100 === 0) log(`합성 진행률: ${Math.round((f/numFrames)*100)}%`);
@@ -282,24 +279,44 @@
             return finalVideoBuffer;
         }
 
+        // 💡 플레이어 전환 로직 (비디오 vs 오디오)
+        function switchPlayer(type) {
+            playerArea.style.display = "block";
+            
+            if (type === 'video') {
+                audioPlayer.pause();
+                audioPlayer.style.display = "none";
+                videoPlayer.style.display = "block";
+                scaleControls.style.display = "block";
+                videoPlayer.play().catch(e => console.warn("자동재생 차단:", e));
+            } else {
+                videoPlayer.pause();
+                videoPlayer.style.display = "none";
+                scaleControls.style.display = "none";
+                audioPlayer.style.display = "block";
+                audioPlayer.play().catch(e => console.warn("자동재생 차단:", e));
+            }
+        }
+
         startBtn.addEventListener('click', async () => {
             const fileInput = document.getElementById('mv2file');
             if (!fileInput.files.length) {
                 alert("MV2 파일을 선택해주세요.");
                 return;
             }
-            startBtn.disabled = true;
-            downloadBtn.style.display = "none";
-            playerArea.style.display = "none";
             
-            player.pause();
-            player.muted = true; 
-            unmuteBtn.classList.remove('fade-out');
+            // 초기화
+            startBtn.disabled = true;
+            resultActions.style.display = "none";
+            playerArea.style.display = "none";
+            videoPlayer.pause();
+            audioPlayer.pause();
             
             logEl.textContent = "변환 준비 중...";
 
             try {
                 const file = fileInput.files[0];
+                const baseFileName = file.name.replace(/\.[^/.]+$/, "");
                 const arrayBuffer = await file.arrayBuffer();
 
                 log("1. MV2 파일 파싱 및 데이터 추출 중...");
@@ -318,10 +335,9 @@
 
                 log("4. 가상 파일 시스템(MEMFS)에 기록 중...");
                 await ffmpeg.writeFile('video.raw', videoBuffer);
-                await ffmpeg.writeFile('audio.mp3', audioBuffer); // 추출된 원본 오디오
+                await ffmpeg.writeFile('audio.mp3', audioBuffer); // 추출된 순수 원본 오디오 보관
 
                 log("5. Muxing 및 ALAC 오디오 인코딩 시작...");
-                // 💡 오디오 코덱을 alac으로 지정하여 변환
                 await ffmpeg.exec([
                     '-y',
                     '-f', 'rawvideo',
@@ -332,30 +348,46 @@
                     '-i', 'audio.mp3',
                     '-c:v', 'libx264',
                     '-pix_fmt', 'yuv420p',
-                    '-c:a', 'alac', // MP3 -> ALAC 무손실 변환
+                    '-c:a', 'alac',
                     '-shortest',
-                    'output.mp4' // ALAC은 MP4/M4A 컨테이너에서 정상 작동
+                    'output.mp4' 
                 ]);
 
-                log("6. 변환 완료! 재생 및 다운로드를 준비합니다.");
+                log("6. 파일 생성 완료! 브라우저 메모리로 데이터를 가져옵니다.");
                 
-                const data = await ffmpeg.readFile('output.mp4');
-                const blob = new Blob([data.buffer], { type: 'video/mp4' });
-                const url = URL.createObjectURL(blob);
+                // 💡 핵심 로직: MP4와 MP3를 각각 독립적으로 읽어와(Read) Blob과 URL을 생성합니다.
                 
-                player.src = url;
-                setPlayerSize(512, 384);  
-                playerArea.style.display = "block";
+                // [A] 비디오(MP4) 데이터 처리
+                const mp4Data = await ffmpeg.readFile('output.mp4');
+                const mp4Blob = new Blob([mp4Data.buffer], { type: 'video/mp4' });
+                const mp4Url = URL.createObjectURL(mp4Blob);
                 
-                player.play().catch(e => log(`자동 재생 정책 차단: ${e}`));
+                // [B] 오디오(MP3) 데이터 처리 (원본 그대로 가져옴)
+                const mp3Data = await ffmpeg.readFile('audio.mp3');
+                const mp3Blob = new Blob([mp3Data.buffer], { type: 'audio/mpeg' });
+                const mp3Url = URL.createObjectURL(mp3Blob);
                 
-                downloadBtn.href = url;
-                downloadBtn.download = file.name.replace(/\.[^/.]+$/, "") + "_alac_eq.mp4";
-                downloadBtn.style.display = "inline-block";
+                // 플레이어에 소스 할당
+                videoPlayer.src = mp4Url;
+                audioPlayer.src = mp3Url;
+                setPlayerSize(512, 384); // 기본 2x 크기로 지정
                 
+                // 다운로드 버튼에 소스 및 파일명 할당
+                downVidBtn.href = mp4Url;
+                downVidBtn.download = `${baseFileName}_video.mp4`;
+                
+                downAudBtn.href = mp3Url;
+                downAudBtn.download = `${baseFileName}_audio.mp3`;
+
+                // 변환 완료 후 액션 패널 표시
+                resultActions.style.display = "block";
+                
+                // 가상 메모리 확보를 위한 정리
                 ffmpeg.deleteFile('video.raw');
                 ffmpeg.deleteFile('audio.mp3');
                 ffmpeg.deleteFile('output.mp4');
+                
+                log("✅ 모든 작업 완료! 버튼을 눌러 확인해 보세요.");
 
             } catch (error) {
                 log(`❌ 에러 발생: ${error.message}`);
@@ -364,6 +396,10 @@
                 startBtn.disabled = false;
             }
         });
+
+        // 선택 재생 버튼 이벤트 연결
+        playVidBtn.addEventListener('click', () => switchPlayer('video'));
+        playAudBtn.addEventListener('click', () => switchPlayer('audio'));
     </script>
 </body>
 </html>
