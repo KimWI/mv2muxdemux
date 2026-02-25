@@ -2,18 +2,51 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>MSX2 MV1/MV2 Universal Web Player (15-Color Standardized)</title>
+    <title>MSX2 MV2 Universal Web Player (Overlay EQ Edition)</title>
     <style>
         body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 30px; }
         
-        #msx-screen {
-            width: 768px; /* 초기 3x */
-            height: 576px; /* 초기 3x */
-            image-rendering: pixelated;
-            border: 4px solid #333;
+        /* 💡 추가: 캔버스와 오버레이를 감싸는 래퍼 */
+        #screen-wrapper {
+            position: relative;
+            display: inline-block;
             box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            border: 4px solid #333;
             background-color: #000;
+        }
+
+        #msx-screen {
+            width: 768px;
+            height: 576px;
+            image-rendering: pixelated;
+            display: block; /* 래퍼 내부에서 여백 제거 */
             transition: width 0.2s, height 0.2s; 
+        }
+
+        /* 💡 추가: 1/16 사이즈 오버레이 스타일 (가로 25%, 세로 25%) */
+	#eq-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 25%;
+            height: 25%;
+            background-color: transparent; /* 💡 여기를 transparent로 변경 */
+            pointer-events: none; 
+            display: none; 
+            align-items: flex-end;
+            justify-content: space-between;
+            padding: 2%; 
+            box-sizing: border-box;
+            gap: 2px;
+            z-index: 10;
+        }
+
+	.overlay-eq-bar {
+            flex: 1;
+            background-color: rgba(255, 255, 255, 0.2); /* 💡 여기를 rgba로 변경 */
+            height: 0%;
+            border-radius: 2px 2px 0 0;
+            transition: height 0.05s ease-out;
         }
         
         .controls { margin-top: 20px; display: flex; justify-content: center; gap: 15px; align-items: center; flex-wrap: wrap; }
@@ -44,14 +77,29 @@
         #vis-palette { display: flex; gap: 2px; }
         .pal-box { width: 24px; height: 24px; border: 1px solid #555; border-radius: 2px; }
         
-        #vis-eq { display: flex; gap: 4px; align-items: flex-end; height: 60px; border-bottom: 2px solid #555; padding-bottom: 2px; width: 150px; }
-        .eq-bar { width: 12px; background-color: #00ffcc; border-radius: 2px 2px 0 0; transition: height 0.05s linear; }
+        #vis-eq { 
+            display: flex; gap: 3px; align-items: flex-end; 
+            height: 60px; border-bottom: 2px solid #555; padding-bottom: 2px; 
+            width: 280px; justify-content: center;
+        }
+        .eq-bar { width: 12px; background-color: #00ffcc; border-radius: 2px 2px 0 0; transition: height 0.05s ease-out; }
+        .eq-center-divider { width: 2px; height: 10px; background-color: #666; margin: 0 4px; }
     </style>
 </head>
 <body>
 
     <h2>MSX2 Universal Player (SCREEN 2)</h2>
-    <canvas id="msx-screen" width="256" height="192"></canvas>
+    
+    <div id="screen-wrapper">
+        <canvas id="msx-screen" width="256" height="192"></canvas>
+        <div id="eq-overlay">
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+            <div class="overlay-eq-bar"></div>
+        </div>
+    </div>
     
     <div class="controls">
         <input type="file" id="file-input" accept=".mv1,.mv2" />
@@ -65,8 +113,14 @@
         
         <div class="panel">
             <label style="cursor: pointer;">
-                <input type="checkbox" id="toggle-dashboard"> 📊 Palette & EQ View
+                <input type="checkbox" id="toggle-dashboard"> 📊 Dash View
             </label>
+        </div>
+
+        <div class="panel">
+            <button id="toggle-overlay-btn" style="padding: 5px 10px; font-size: 14px;">Overlay ON</button>
+            <label for="overlay-opacity" style="margin-left: 10px; font-size: 14px;">Opacity: <span id="opacity-label">20%</span></label>
+            <input type="range" id="overlay-opacity" min="0" max="1" step="0.05" value="0.2" style="width: 80px;">
         </div>
     </div>
     
@@ -79,7 +133,7 @@
             <div id="vis-palette"></div>
         </div>
         <div class="dash-section">
-            <div class="dash-title">EQ DATA (9 BYTES)</div>
+            <div class="dash-title">STEREO EQ SPECTRUM (18 BANDS)</div>
             <div id="vis-eq"></div>
         </div>
     </div>
@@ -113,6 +167,18 @@ class MSXMediaDemuxer {
         }
         
         const eqContainer = document.getElementById('vis-eq');
+        
+        for (let i = 0; i < 9; i++) {
+            const d = document.createElement('div');
+            d.className = 'eq-bar';
+            d.style.height = '0px';
+            eqContainer.appendChild(d);
+        }
+        
+        const divider = document.createElement('div');
+        divider.className = 'eq-center-divider';
+        eqContainer.appendChild(divider);
+
         for (let i = 0; i < 9; i++) {
             const d = document.createElement('div');
             d.className = 'eq-bar';
@@ -144,7 +210,15 @@ class MSXMediaDemuxer {
         document.getElementById('btn-pause').disabled = true;
         
         const eqDivs = document.getElementById('vis-eq').children;
-        for(let i=0; i<9; i++) eqDivs[i].style.height = '0px';
+        for(let i=0; i<eqDivs.length; i++) {
+            if(eqDivs[i].className === 'eq-bar') eqDivs[i].style.height = '0px';
+        }
+
+        // 오버레이 리셋
+        const overlayBars = document.getElementById('eq-overlay').children;
+        for(let i=0; i<overlayBars.length; i++) {
+            overlayBars[i].style.height = '0%';
+        }
     }
 
     async loadFile(file) {
@@ -202,11 +276,9 @@ class MSXMediaDemuxer {
             const ct = data.slice(offset + 6144, offset + 12288);
             const pcm = data.slice(offset + 12288, offset + 13232);
             
-            // 💡 [수정] MV1에서도 정확히 30바이트(15색)만 추출하고 0번을 하드코딩
             const palRaw = data.slice(offset + 13232, offset + 13262); 
             const palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
-            
-            const eqRaw = new Uint8Array(9); 
+            const eqRaw = new Uint8Array(10); 
 
             this.frames.push({ pgt, ct, palette, eqRaw });
             pcmChunks.push(pcm);
@@ -240,11 +312,10 @@ class MSXMediaDemuxer {
             const pgt = data.slice(offset, offset + 6144);
             const ct = data.slice(offset + 6144, offset + 12288);
             
-            // 💡 [수정] 공식이든 레거시든 30바이트(15색)만 읽고 0번 색상을 합침!
             const palRaw = data.slice(offset + 12288, offset + 12318);
             const palette = [[0, 0, 0]].concat(this.extractPalette(palRaw, 15));
             
-            const eqRaw = data.slice(offset + 12320, offset + 12329);
+            const eqRaw = data.slice(offset + 12320, offset + 12330);
             
             const sz = data[offset + 12800];
             const mp3Data = data.slice(offset + 12801, offset + 12801 + (sz * 32));
@@ -267,7 +338,6 @@ class MSXMediaDemuxer {
         this.audioBuffer = await this.audioCtx.decodeAudioData(mp3Concat.buffer);
     }
 
-    // 💡 [수정] colorCount 인자는 이제 15로 고정되어 들어옵니다.
     extractPalette(palData, colorCount) {
         const pal = [];
         for (let i = 0; i < colorCount; i++) {
@@ -314,6 +384,7 @@ class MSXMediaDemuxer {
         }
         this.ctx.putImageData(imgData, 0, 0);
 
+        // 하단 대시보드 업데이트
         if (document.getElementById('toggle-dashboard').checked) {
             const palDivs = document.getElementById('vis-palette').children;
             for(let i = 0; i < 16; i++) {
@@ -323,11 +394,26 @@ class MSXMediaDemuxer {
             
             const eqDivs = document.getElementById('vis-eq').children;
             for(let i = 0; i < 9; i++) {
-                const val = frame.eqRaw[i] || 0;
-                // EQ 데이터 값에 따라 막대 그래프 높이 동적 반영
-		const clampedVal = Math.min(val, 16); 
-                const heightPx = (clampedVal / 16.0) * 60;
+                const rawVal = frame.eqRaw[i] !== undefined ? frame.eqRaw[i] : 15;
+                const realVal = 15 - Math.min(rawVal, 15); 
+                const heightPx = (realVal / 15.0) * 60; 
+                
                 eqDivs[i].style.height = `${heightPx}px`;
+                eqDivs[18 - i].style.height = `${heightPx}px`;
+            }
+        }
+
+        // 💡 추가: 오버레이 EQ 업데이트
+        const eqOverlay = document.getElementById('eq-overlay');
+        if (eqOverlay.style.display !== 'none') {
+            const overlayBars = eqOverlay.children;
+            for(let i = 0; i < 9; i++) {
+                const rawVal = frame.eqRaw[i] !== undefined ? frame.eqRaw[i] : 15;
+                const realVal = 15 - Math.min(rawVal, 15); 
+                
+                // 오버레이는 픽셀(px)이 아닌 퍼센트(%)로 높이를 설정하여 해상도 비율에 유연하게 대응합니다.
+                const heightPct = (realVal / 15.0) * 100; 
+                overlayBars[i].style.height = `${heightPct}%`;
             }
         }
     }
@@ -379,7 +465,6 @@ class MSXMediaDemuxer {
     }
 }
 
-// UI 이벤트 바인딩
 const player = new MSXMediaDemuxer('msx-screen');
 
 document.getElementById('file-input').addEventListener('change', async (e) => {
@@ -404,6 +489,29 @@ document.getElementById('scale-slider').addEventListener('input', (e) => {
 document.getElementById('toggle-dashboard').addEventListener('change', (e) => {
     const dash = document.getElementById('dashboard');
     dash.style.display = e.target.checked ? 'flex' : 'none';
+});
+
+// 💡 추가: 오버레이 토글 및 투명도 이벤트 리스너
+document.getElementById('toggle-overlay-btn').addEventListener('click', (e) => {
+    const overlay = document.getElementById('eq-overlay');
+    if (overlay.style.display === 'none') {
+        overlay.style.display = 'flex';
+        e.target.innerText = 'Overlay OFF';
+        e.target.style.backgroundColor = '#d9534f'; // 켜졌을 때 붉은 톤으로 변경
+    } else {
+        overlay.style.display = 'none';
+        e.target.innerText = 'Overlay ON';
+        e.target.style.backgroundColor = '#333';
+    }
+});
+
+document.getElementById('overlay-opacity').addEventListener('input', (e) => {
+    const alpha = e.target.value;
+    document.getElementById('opacity-label').innerText = `${Math.round(alpha * 100)}%`;
+    const overlayBars = document.getElementsByClassName('overlay-eq-bar');
+    for(let i = 0; i < overlayBars.length; i++) {
+        overlayBars[i].style.backgroundColor = `rgba(255, 255, 255, ${alpha})`;
+    }
 });
 
 </script>
