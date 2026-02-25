@@ -183,7 +183,7 @@ class MV2PerfectFrameEncoder:
         hash_str = hashlib.md5(f"{input_video}_{os.getpid()}".encode()).hexdigest()[:8]
         self.temp_mp3 = f"temp_audio_{self.base_name}_{hash_str}.mp3"
         self.temp_vid = f"temp_video_{self.base_name}_{hash_str}.mp4"
-        self.temp_pcm = f"temp_audio_{self.base_name}_{hash_str}.pcm" # 💡 FFT 분석용 Raw PCM
+        self.temp_pcm = f"temp_audio_{self.base_name}_{hash_str}.pcm" 
 
         if self.debug_frames:
             self.debug_dir = f"debug_frames_{self.base_name}"
@@ -260,33 +260,29 @@ class MV2PerfectFrameEncoder:
             raw = [(pal[i], pal[i+1], pal[i+2]) for i in range(0, len(pal), 3)] if pal else []
             return raw, False
 
-    # 💡 [핵심] 9밴드 오디오 FFT 스펙트럼 분석기 추가
+    # 💡 [핵심 수정 1] 10바이트 고정 반환 (크기 불일치 ValueError 완벽 차단)
     def _analyze_audio_eq(self, pcm_data, sample_rate, frame_idx, fps):
-        """특정 프레임 시간대의 PCM 데이터를 잘라내어 FFT를 돌리고 9개의 0~15 레벨 반환"""
         samples_per_frame = int(sample_rate / fps)
         start_idx = frame_idx * samples_per_frame
         end_idx = start_idx + samples_per_frame
         
         if start_idx >= len(pcm_data):
-            return bytearray([0] * 9)
+            return bytearray([15] * 10) # 9바이트 반환 버그 수정
             
         chunk = pcm_data[start_idx:end_idx]
         if len(chunk) < samples_per_frame:
             chunk = np.pad(chunk, (0, samples_per_frame - len(chunk)))
 
-        # 해밍 윈도우 적용 후 FFT 수행
         windowed = chunk * np.hamming(len(chunk))
         fft_result = np.abs(np.fft.rfft(windowed))
         freqs = np.fft.rfftfreq(len(chunk), d=1/sample_rate)
 
-        # 9 밴드 주파수 경계 (로그 스케일 기반 10밴드 중 상위 9개 사용)
-        # 31.5, 63, 125, 250, 500, 1k, 2k, 4k, 8k, (16k는 더미)
         bands = [
             (20, 45), (45, 90), (90, 180), (180, 360), (360, 720),
             (720, 1400), (1400, 2800), (2800, 5600), (5600, 11200)
         ]
-        # 💡 [수정] 오리지널 규격에 맞춰 10바이트 배열로 생성 (마지막은 0 패딩)
-        eq_levels = bytearray(10) 
+        
+        eq_levels = bytearray([15] * 10) # 전체 10바이트를 15(무음)로 초기화
         
         for i, (low, high) in enumerate(bands):
             idx = np.where((freqs >= low) & (freqs < high))[0]
@@ -296,18 +292,12 @@ class MV2PerfectFrameEncoder:
                 val = 0
                 if band_energy > 0:
                     val_db = 10 * np.log10(band_energy)
-                    # 💡 0~15 스케일로 압축 (30~75dB 기준)
                     val = int(max(0, min(15, (val_db - 30) / 3.0))) 
                 
-                # 💡 [핵심] 오리지널 트릭 적용: 값을 반전시킴! (15가 조용함, 0이 최대 볼륨)
                 eq_levels[i] = 15 - val 
-            else:
-                eq_levels[i] = 15 # 소리가 없으면 15
                 
-        # 10번째 바이트는 생성 시 이미 0으로 초기화되어 있으므로 그대로 둠
         return eq_levels
         
-
     def run(self):
         temporal_msg = f"활성화 (임계값: {self.scene_thresh})" if self.use_temporal else "비활성화"
         roi_msg = "얼굴 집중(ROI 30x)" if self.use_roi_face else "기본"
@@ -317,14 +307,14 @@ class MV2PerfectFrameEncoder:
         if self.start_sec > 0: time_args.extend(["-ss", str(self.start_sec)])
         if self.end_sec: time_args.extend(["-to", str(self.end_sec)])
 
-        # 1. MP3 변환 (저장용)
+        # 1. MP3 변환
         subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "libmp3lame", "-ac", "2", "-ar", "44100", "-b:a", "128k", "-id3v2_version", "0", self.temp_mp3], capture_output=True)
         
-        # 💡 2. FFT 분석용 Mono PCM 추출 (16kHz, 16bit)
+        # 2. FFT 분석용 Mono PCM 추출
         print("[*] 오디오 FFT 분석용 PCM 추출 중...")
-        subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", self.temp_pcm], capture_output=True)
+        # subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", self.temp_pcm], capture_output=True)
+        subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", self.temp_pcm], capture_output=True)
         
-        # PCM 데이터 메모리 로드
         pcm_data = np.fromfile(self.temp_pcm, dtype=np.int16) if os.path.exists(self.temp_pcm) else np.zeros(16000, dtype=np.int16)
 
         if not self.skip_prescale:
@@ -405,7 +395,6 @@ class MV2PerfectFrameEncoder:
             block[6144:12288] = ct.tobytes()
             block[12288:12318] = pal_b
             
-            # 💡 [핵심] FFT 스펙트럼 분석 후 오프셋 12320에 9바이트 EQ 데이터 기록
             eq_data = self._analyze_audio_eq(pcm_data, 16000, idx, 15.0)
             block[12320:12330] = eq_data
             
@@ -424,12 +413,34 @@ class MV2PerfectFrameEncoder:
             idx += 1
 
         print("\n")
-        eof = bytearray(16384); eof[12318] = 0x01; eof[12800] = 0x22 
-        out_f.write(eof); cap.release(); out_f.close()
+        
+        # 💡 [핵심 수정 2] 남은 MP3 데이터를 마지막 EOF 블록들에 남김없이 기록 (디코딩 에러 원천 차단)
+        remaining_mp3 = mp3_data[mp3_off:]
+        while len(remaining_mp3) > 0:
+            eof_block = bytearray(b'\x55' * 16384)
+            eof_block[12318] = 0x01 # EOF 마커
+            
+            chunk_size = min(len(remaining_mp3), 8160)
+            sz = math.ceil(chunk_size / 32)
+            eof_block[12800] = sz
+            
+            eof_block[12801 : 12801 + chunk_size] = remaining_mp3[:chunk_size]
+            out_f.write(eof_block)
+            
+            remaining_mp3 = remaining_mp3[chunk_size:]
+
+        # 최종 종료 마커 블록
+        eof = bytearray(16384)
+        eof[12318] = 0x01
+        eof[12800] = 0x22 
+        out_f.write(eof)
+        
+        cap.release()
+        out_f.close()
         
         if os.path.exists(self.temp_mp3): os.remove(self.temp_mp3)
         if os.path.exists(self.temp_vid): os.remove(self.temp_vid)
-        if os.path.exists(self.temp_pcm): os.remove(self.temp_pcm) # 💡 PCM 정리
+        if os.path.exists(self.temp_pcm): os.remove(self.temp_pcm) 
         print(f"[!] 공식 규격(16KB 헤더) 완벽 인코딩 완료: {self.output_mv2}")
 
 if __name__ == "__main__":
