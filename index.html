@@ -311,8 +311,8 @@
                 log("3. FFmpeg.wasm 로드 중...");
                 if (!ffmpeg.loaded) {
                     await ffmpeg.load({
-                        coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.4/dist/umd/ffmpeg-core.js',
-                        wasmURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.4/dist/umd/ffmpeg-core.wasm'
+                        coreURL: 'ffmpeg-core.js',
+                        wasmURL: 'ffmpeg-core.wasm'
                     });
                 }
 
