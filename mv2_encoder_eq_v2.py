@@ -434,7 +434,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, use_base_rgb=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False, keep_pre=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, use_base_rgb=False, use_prime_color=False, use_avgen_color=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False, keep_pre=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -454,6 +454,8 @@ class MV2PerfectFrameEncoder:
         self.use_roi_flow = use_roi_flow
         self.use_base_colors = use_base_colors
         self.use_base_rgb = use_base_rgb
+        self.use_prime_color = use_prime_color
+        self.use_avgen_color = use_avgen_color
         self.base_weight = float(base_weight)
         self.crop_up = crop_up
         self.crop_left = crop_left
@@ -463,6 +465,7 @@ class MV2PerfectFrameEncoder:
         self.prev_hist = None
         self.prev_centroids = None
         self.prev_gray_roi = None
+        self.prime_pool = None
         
         if self.use_roi_face:
             cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
@@ -481,6 +484,68 @@ class MV2PerfectFrameEncoder:
             self.debug_dir = f"debug_frames_{self.base_name}"
             os.makedirs(self.debug_dir, exist_ok=True)
             print(f"[*] 디버그 모드 활성화: 프레임 이미지가 '{self.debug_dir}' 폴더에 저장됩니다.")
+
+    def _extract_global_prime_pool(self, input_src):
+        print("\n\n[Prime Color] 1단계: 전체 영상 사전 스캔 및 32 마스터 컬러(Prime Pool) 추출 중...")
+        cap = cv2.VideoCapture(input_src)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0: total_frames = 1000
+        
+        sample_count = 50
+        step = max(1, total_frames // sample_count)
+        
+        sampled_pixels = []
+        curr_frame = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret: break
+            
+            if curr_frame % step == 0:
+                small_frame = cv2.resize(frame, (64, 48), interpolation=cv2.INTER_AREA)
+                sample_rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+                sampled_pixels.append(sample_rgb.reshape(-1, 3))
+                sys.stdout.write(f"\r  > 풀링 진행률: {curr_frame}/{total_frames} 프레임 스캔 완료...   ")
+                sys.stdout.flush()
+                
+            curr_frame += 1
+            
+        cap.release()
+        print("\n  > 픽셀 데이터 취합 완료. K-Means(32) 모델 학습을 시작합니다 (수십 초 ~ 수 분 소요)...")
+        
+        if len(sampled_pixels) == 0:
+            print("[!] 사전 샘플링 실패. Prime Color 모드를 건너뜁니다.")
+            return
+
+        all_pixels = np.vstack(sampled_pixels).astype(np.float32)
+        
+        if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+            data_t = torch.tensor(all_pixels, device='cuda')
+            if data_t.shape[0] > 100000:
+                indices = torch.randperm(data_t.shape[0])[:100000]
+                data_t = data_t[indices]
+            weight_t = torch.ones(data_t.shape[0], device='cuda')
+            centers = _kmeans_pytorch_weighted(data_t, weight_t, n_clusters=32, init_centroids=None, n_init=3, max_iter=50)
+            global_colors = centers.cpu().numpy()
+        else:
+            if all_pixels.shape[0] > 100000:
+                np.random.shuffle(all_pixels)
+                all_pixels = all_pixels[:100000]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                km = KMeans(n_clusters=32, init='k-means++', n_init=3, max_iter=50)
+                km.fit(all_pixels)
+                global_colors = km.cluster_centers_
+
+        # 절대 흑색/백색과 노이즈 오차가 너무 적은(가까운) 색상은 프라임 변동을 주므로 제거
+        filtered = []
+        for c in global_colors:
+            dist_black = np.sum((c - np.array([0,0,0]))**2)
+            dist_white = np.sum((c - np.array([255,255,255]))**2)
+            if dist_black > 400 and dist_white > 400: # 대략 RGB 거리 차이 20 미만 컷
+                filtered.append(c)
+                
+        self.prime_pool = np.array(filtered) if len(filtered) >= 14 else global_colors
+        print(f"[Prime Color] 32 마스터 컬러 풀 생성 완료! (유효 액티브 컬러: {len(self.prime_pool)}개)\n")
 
     def _detect_scene_change(self, img_np):
         hist = cv2.calcHist([img_np], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
@@ -553,17 +618,22 @@ class MV2PerfectFrameEncoder:
                 data_points, weights = extract_top2_colors_gpu(img_np, weight_mask)
                 
                 # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
-                if self.use_base_colors or self.use_base_rgb:
+                if self.use_base_colors or self.use_base_rgb or self.use_avgen_color:
                     # 현재 프레임의 전체 밝기(BT.601) 평균 계산
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
                     msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
-                    lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
                     
                     anchor_list = [[0,0,0], [255,255,255]]
-                    if self.use_base_colors:
-                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
-                    if self.use_base_rgb:
-                        anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
+                    
+                    if self.use_avgen_color:
+                        lvl = 182.0 if avg_lum > 127 else 73.0
+                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0], [lvl,0,0]])
+                    else:
+                        lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
+                        if self.use_base_colors:
+                            anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
+                        if self.use_base_rgb:
+                            anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
                         
                     fixed_c = torch.tensor(anchor_list, dtype=torch.float32, device='cuda')
                     fixed_w = torch.full((len(anchor_list),), self.base_weight, dtype=torch.float32, device='cuda')
@@ -575,16 +645,21 @@ class MV2PerfectFrameEncoder:
                 data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
                 
                 # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
-                if self.use_base_colors or self.use_base_rgb:
+                if self.use_base_colors or self.use_base_rgb or self.use_avgen_color:
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
                     msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
-                    lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
                     
                     anchor_list = [[0,0,0], [255,255,255]]
-                    if self.use_base_colors:
-                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
-                    if self.use_base_rgb:
-                        anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
+                    
+                    if self.use_avgen_color:
+                        lvl = 182.0 if avg_lum > 127 else 73.0
+                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0], [lvl,0,0]])
+                    else:
+                        lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
+                        if self.use_base_colors:
+                            anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
+                        if self.use_base_rgb:
+                            anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
                         
                     fixed_c = np.array(anchor_list, dtype=np.float32)
                     fixed_w = np.full((len(anchor_list),), self.base_weight, dtype=np.float32)
@@ -598,6 +673,42 @@ class MV2PerfectFrameEncoder:
                 self.prev_centroids = None
             else:
                 n_clusters = min(unique_colors, 15)
+                
+                # ------ PRIME COLOR POOL INTERCEPT ------
+                if getattr(self, 'use_prime_color', False) and self.prime_pool is not None:
+                    if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+                        dp_t = data_points if isinstance(data_points, torch.Tensor) else torch.tensor(data_points, device='cuda')
+                        w_t = weights if isinstance(weights, torch.Tensor) else torch.tensor(weights, device='cuda')
+                        pool_t = torch.tensor(self.prime_pool, dtype=torch.float32, device='cuda')
+
+                        dist = torch.cdist(dp_t, pool_t, p=2.0)
+                        closest_idx = torch.argmin(dist, dim=1)
+
+                        pool_weights = torch.zeros(pool_t.shape[0], device='cuda')
+                        pool_weights.scatter_add_(0, closest_idx, w_t)
+
+                        top_k = min(14, pool_t.shape[0])
+                        _, top_indices = torch.topk(pool_weights, top_k)
+                        selected_centers = pool_t[top_indices].cpu().numpy()
+                    else:
+                        dp = data_points if isinstance(data_points, np.ndarray) else data_points.cpu().numpy()
+                        w = weights if isinstance(weights, np.ndarray) else weights.cpu().numpy()
+                        
+                        from scipy.spatial.distance import cdist
+                        dist = cdist(dp, self.prime_pool)
+                        closest_idx = np.argmin(dist, axis=1)
+
+                        pool_weights = np.zeros(self.prime_pool.shape[0], dtype=np.float32)
+                        np.add.at(pool_weights, closest_idx, w)
+
+                        top_k = min(14, self.prime_pool.shape[0])
+                        top_indices = np.argsort(pool_weights)[::-1][:top_k]
+                        selected_centers = self.prime_pool[top_indices]
+                        
+                    raw = [(255,255,255)] + [tuple(c) for c in selected_centers]
+                    self.prev_centroids = None
+                    return raw, face_detected
+                # -----------------------------------------
                 
                 if self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters:
                     init_val = np.array(self.prev_centroids)
@@ -719,6 +830,10 @@ class MV2PerfectFrameEncoder:
         else:
             cap = cv2.VideoCapture(self.input_video)
             orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+        if getattr(self, 'use_prime_color', False):
+            _src = self.temp_vid if not self.skip_prescale else self.input_video
+            self._extract_global_prime_pool(_src)
 
         with open(self.temp_mp3, "rb") as f: mp3_data = f.read()
         out_f = open(self.output_mv2, "wb")
@@ -855,6 +970,8 @@ if __name__ == "__main__":
     parser.add_argument("--roi-flow", action="store_true", help="픽셀 단위의 광학 흐름(벡터 추적, 정밀함)을 포착하여 빠른 움직임에 높은 팔레트 우선순위 부여")
     parser.add_argument("--base-colors", action="store_true", help="Black, White, Cyan, Magenta, Yellow 5원색을 강제로 팔레트에 삽입(Soft Anchor)하여 중간톤 뭉개짐 방지")
     parser.add_argument("--base-rgb", action="store_true", help="[실험적] Red, Green, Blue 원색을 강제 앵커링 (팔레트 슬롯 낭비로 화질 저하가 일어날 수 있음)")
+    parser.add_argument("--prime-color", action="store_true", help="[Two-Pass 추천] 영상을 사전 분석하여 32색 마스터 풀을 생성하고, 인코딩 시 이 안에서만 색상을 골라 노이즈 깜빡임을 완벽히 차단합니다.")
+    parser.add_argument("--avgen-color", action="store_true", help="오리지널 MSX 인코더 방식을 모방하여 Black, White, Cyan, Magenta, Yellow, Red 6색을 2단계 밝기(25%/75%)로 고정 앵커링합니다.")
     parser.add_argument("--base-weight", type=float, default=2000.0, help="Base Color들의 K-Means 가중치 록인(Lock-in) 강도 (기본: 2000.0)")
     parser.add_argument("--cuda", action="store_true", help="NVIDIA CUDA(NVENC/NVDEC)를 사용하여 FFmpeg 다운스케일 렌더링을 매우 가속화합니다.")
     parser.add_argument("-ss", dest="start", default=None)
@@ -890,6 +1007,8 @@ if __name__ == "__main__":
         use_roi_flow=args.roi_flow,
         use_base_colors=args.base_colors,
         use_base_rgb=args.base_rgb,
+        use_prime_color=args.prime_color,
+        use_avgen_color=args.avgen_color,
         base_weight=args.base_weight,
         crop_up=args.crop_up,
         crop_left=args.crop_left,
