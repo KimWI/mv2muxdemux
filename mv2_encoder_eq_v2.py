@@ -1,4 +1,4 @@
-import os, sys, math, subprocess, cv2, hashlib, warnings, argparse
+import os, sys, math, subprocess, cv2, hashlib, warnings, argparse, re
 import numpy as np
 from sklearn.cluster import KMeans
 import tempfile
@@ -474,7 +474,9 @@ class MV2PerfectFrameEncoder:
                 print("[!] 경고: OpenCV Haar Cascade 모델을 로드할 수 없습니다. ROI 기능이 무시됩니다.")
                 self.use_roi_face = False
 
-        self.base_name = os.path.splitext(os.path.basename(input_video))[0]
+        raw_base = os.path.splitext(os.path.basename(input_video))[0]
+        self.base_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', raw_base)
+        
         hash_str = hashlib.md5(f"{input_video}_{os.getpid()}".encode()).hexdigest()[:8]
         self.temp_mp3 = f"temp_audio_{self.base_name}_{hash_str}.mp3"
         self.temp_vid = f"temp_video_{self.base_name}_{hash_str}.mp4"
@@ -707,24 +709,6 @@ class MV2PerfectFrameEncoder:
                         
                     raw = [tuple(c) for c in selected_centers]
                     self.prev_centroids = None
-
-                # ------ AVGEN COLOR POST-PROCESSING ------
-                if getattr(self, 'use_avgen_color', False) and 'anchor_list' in locals() and anchor_list:
-                    # 1. K-Means가 내보낸 raw 배열에서 고정색 후보(anchor_list)와 너무 비슷한 색은 제거 (중복 방지)
-                    filtered_raw = []
-                    for c in raw:
-                        is_dup = False
-                        for ac in anchor_list:
-                            if sum((a - b)**2 for a, b in zip(c, ac)) < 150: # 거리 차이 미만이면 중복으로 간주
-                                is_dup = True
-                                break
-                        if not is_dup: filtered_raw.append(c)
-                    
-                    # 2. 강제로 0~5번 슬롯에 6색 박아넣기
-                    raw = [tuple(c) for c in anchor_list] + filtered_raw
-                    
-                # -----------------------------------------
-                return [(255,255,255)] + raw if getattr(self, 'use_prime_color', False) and self.prime_pool is not None else raw, face_detected
                 
                 if self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters:
                     init_val = np.array(self.prev_centroids)
@@ -819,11 +803,11 @@ class MV2PerfectFrameEncoder:
         if self.end_sec: time_args.extend(["-to", str(self.end_sec)])
 
         # 1. MP3 변환
+        print("[*] 오디오 MP3 추출 중...")
         subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "libmp3lame", "-ac", "2", "-ar", "44100", "-b:a", "128k", "-id3v2_version", "0", self.temp_mp3], capture_output=True)
         
         # 2. FFT 분석용 Mono PCM 추출
         print("[*] 오디오 FFT 분석용 PCM 추출 중...")
-        # subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", self.temp_pcm], capture_output=True)
         subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-vn", "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000", self.temp_pcm], capture_output=True)
         
         pcm_data = np.fromfile(self.temp_pcm, dtype=np.int16) if os.path.exists(self.temp_pcm) else np.zeros(16000, dtype=np.int16)
