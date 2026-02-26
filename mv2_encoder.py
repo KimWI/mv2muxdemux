@@ -154,7 +154,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, crop_up=0, crop_left=0):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -167,7 +167,9 @@ class MV2PerfectFrameEncoder:
         self.use_temporal = use_temporal
         self.scene_thresh = scene_thresh  
         self.debug_frames = debug_frames 
-        self.use_roi_face = use_roi_face # 💡 [추가] 얼굴 인식 집중 모드 스위치
+        self.use_roi_face = use_roi_face
+        self.crop_up = crop_up
+        self.crop_left = crop_left
 
         self.prev_hist = None
         self.prev_centroids = None
@@ -280,9 +282,22 @@ class MV2PerfectFrameEncoder:
 
         if not self.skip_prescale:
             print("[*] FFmpeg 512x384 사전 렌더링 중...")
-            if self.aspect_mode == 'pad': vf_string = "scale=512:384:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:384:-1:-1:color=black"
-            elif self.aspect_mode == 'crop': vf_string = "scale=512:384:force_original_aspect_ratio=increase:flags=lanczos,crop=512:384"
-            else: vf_string = "scale=512:384:flags=lanczos"
+            
+            # calculate pad/crop coordinates based on percent shift parameter (-100 to 100)
+            # Default center formula: x=(ow-iw)/2, y=(oh-ih)/2
+            # Modifier logic (e.g. crop_left=-100 pushes video full left, 100 pushes full right)
+            x_shift = f"((ow-iw)/2)*(1.0+({self.crop_left}/100.0))"
+            y_shift = f"((oh-ih)/2)*(1.0+({self.crop_up}/100.0))"
+            cx_shift = f"((in_w-out_w)/2)*(1.0+({self.crop_left}/100.0))"
+            cy_shift = f"((in_h-out_h)/2)*(1.0+({self.crop_up}/100.0))"
+
+            if self.aspect_mode == 'pad': 
+                vf_string = f"scale=512:384:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:384:{x_shift}:{y_shift}:color=black"
+            elif self.aspect_mode == 'crop': 
+                vf_string = f"scale=512:384:force_original_aspect_ratio=increase:flags=lanczos,crop=512:384:{cx_shift}:{cy_shift}"
+            else: 
+                vf_string = "scale=512:384:flags=lanczos"
+                
             subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-an", "-vf", vf_string, "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", self.temp_vid], capture_output=True)
             cap = cv2.VideoCapture(self.temp_vid)
             orig_fps = 15.0
@@ -397,6 +412,10 @@ if __name__ == "__main__":
     parser.add_argument("--aspect", choices=['pad', 'crop', 'force'], default='pad')
     parser.add_argument("--skip-prescale", action="store_true")
     
+    # 💡 [추가] 여백 패스 및 크롭 위치 조절 (-100 ~ 100 퍼센트 배열 스크롤)
+    parser.add_argument("--crop-up", type=float, default=0, help="비디오 종횡비 패딩시 상하 강제 이동 퍼센트 (-100:상단 딱붙 ~ 100:하단 딱붙)")
+    parser.add_argument("--crop-left", type=float, default=0, help="비디오 종횡비 패딩시 좌우 강제 이동 퍼센트 (-100:좌측 딱붙 ~ 100:우측 딱붙)")
+    
     parser.add_argument("--debug-frame", "--debug-frames", dest="debug_frames", action="store_true", help="인코딩 전/후 프레임을 임시 폴더에 저장")
     
     args = parser.parse_args()
@@ -413,5 +432,7 @@ if __name__ == "__main__":
         use_temporal=args.temporal,
         debug_frames=args.debug_frames,
         scene_thresh=args.scene_thresh,
-        use_roi_face=args.roi_face  # 💡 [추가] 파라미터 전달
+        use_roi_face=args.roi_face,
+        crop_up=args.crop_up,
+        crop_left=args.crop_left
         ).run()
