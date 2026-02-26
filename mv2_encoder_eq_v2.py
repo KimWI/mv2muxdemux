@@ -503,6 +503,33 @@ class MV2PerfectFrameEncoder:
         return is_scene_change
 
     def _extract_palette(self, img_np, is_scene_change):
+        face_detected = False
+        
+        # 💡 [AVGEN 오리지널 에뮬레이션]
+        # (0, 73, 146, 255) 4단계 명도(총 64색) 강제 스냅 후 최빈도 15색 추출
+        if self.use_avgen_color:
+            grid = np.array([0, 73, 146, 255], dtype=np.uint8)
+            diffs = np.abs(img_np[..., np.newaxis] - grid)
+            closest_idx = diffs.argmin(axis=-1)
+            quant_img = grid[closest_idx]
+            
+            pixels = quant_img.reshape(-1, 3)
+            packed = (pixels[:, 0].astype(np.uint32) << 16) | (pixels[:, 1].astype(np.uint32) << 8) | pixels[:, 2].astype(np.uint32)
+            unique_packed, counts = np.unique(packed, return_counts=True)
+            
+            sort_idx = np.argsort(-counts)
+            top_packed = unique_packed[sort_idx]
+            
+            raw = []
+            for p in top_packed:
+                c = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF)
+                if tuple(c) != (0, 0, 0): # 제외: 0번은 항상 VDP 하드웨어 블랙으로 고정됨
+                    raw.append(tuple(int(v) for v in c))
+                if len(raw) == 15:
+                    break
+            
+            return raw, face_detected
+
         n_colors = 15
         
         if self.quant_algo == 'kmeans':
@@ -558,22 +585,18 @@ class MV2PerfectFrameEncoder:
                 data_points, weights = extract_top2_colors_gpu(img_np, weight_mask)
                 
                 # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
-                if self.use_base_colors or self.use_base_rgb or self.use_avgen_color:
+                if self.use_base_colors or self.use_base_rgb:
                     # 현재 프레임의 전체 밝기(BT.601) 평균 계산
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
                     msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
                     
                     anchor_list = [[0,0,0], [255,255,255]]
                     
-                    if self.use_avgen_color:
-                        lvl = 182.0 if avg_lum > 127 else 73.0
-                        anchor_list.extend([[0,lvl,lvl], [lvl,lvl,0], [lvl,0,lvl], [lvl,0,0]])
-                    else:
-                        lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
-                        if self.use_base_colors:
-                            anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
-                        if self.use_base_rgb:
-                            anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
+                    lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
+                    if self.use_base_colors:
+                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
+                    if self.use_base_rgb:
+                        anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
                         
                     fixed_c = torch.tensor(anchor_list, dtype=torch.float32, device='cuda')
                     fixed_w = torch.full((len(anchor_list),), self.base_weight, dtype=torch.float32, device='cuda')
@@ -585,21 +608,17 @@ class MV2PerfectFrameEncoder:
                 data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
                 
                 # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
-                if self.use_base_colors or self.use_base_rgb or self.use_avgen_color:
+                if self.use_base_colors or self.use_base_rgb:
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
                     msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
                     
                     anchor_list = [[0,0,0], [255,255,255]]
                     
-                    if self.use_avgen_color:
-                        lvl = 182.0 if avg_lum > 127 else 73.0
-                        anchor_list.extend([[0,lvl,lvl], [lvl,lvl,0], [lvl,0,lvl], [lvl,0,0]])
-                    else:
-                        lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
-                        if self.use_base_colors:
-                            anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
-                        if self.use_base_rgb:
-                            anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
+                    lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
+                    if self.use_base_colors:
+                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
+                    if self.use_base_rgb:
+                        anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
                         
                     fixed_c = np.array(anchor_list, dtype=np.float32)
                     fixed_w = np.full((len(anchor_list),), self.base_weight, dtype=np.float32)
@@ -612,7 +631,7 @@ class MV2PerfectFrameEncoder:
                 raw = [(0,0,0)] * 15
                 self.prev_centroids = None
             else:
-                n_clusters = min(unique_colors, 16 if getattr(self, 'use_avgen_color', False) else 15)
+                n_clusters = min(unique_colors, 15)
                 
                 
                 if self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters:
@@ -781,14 +800,7 @@ class MV2PerfectFrameEncoder:
             while len(final_pal_888) < 15: final_pal_888.append((0,0,0))
             final_pal_888 = final_pal_888[:15]
             
-            if self.use_avgen_color:
-                # [AVGEN 모드] 0번은 하드웨어 블랙. 1~5번 슬롯의 고정 5색(W,C,Y,M,R)만 밝기 정렬에서 보호
-                fixed_part = final_pal_888[:5]
-                dynamic_part = final_pal_888[5:]
-                dynamic_part.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
-                final_pal_888 = fixed_part + dynamic_part
-            else:
-                final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+            final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
             
             pal_333 = [tuple(int(round((c/255.0)*7)) for c in rgb) for rgb in final_pal_888]
             pal_888_np = np.zeros((16, 3), dtype=np.int32)
