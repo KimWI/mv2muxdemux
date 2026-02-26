@@ -434,7 +434,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False, keep_pre=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, use_base_rgb=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False, keep_pre=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -453,6 +453,7 @@ class MV2PerfectFrameEncoder:
         self.use_roi_diff = use_roi_diff
         self.use_roi_flow = use_roi_flow
         self.use_base_colors = use_base_colors
+        self.use_base_rgb = use_base_rgb
         self.base_weight = float(base_weight)
         self.crop_up = crop_up
         self.crop_left = crop_left
@@ -552,14 +553,20 @@ class MV2PerfectFrameEncoder:
                 data_points, weights = extract_top2_colors_gpu(img_np, weight_mask)
                 
                 # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
-                if self.use_base_colors:
+                if self.use_base_colors or self.use_base_rgb:
                     # 현재 프레임의 전체 밝기(BT.601) 평균 계산
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
                     msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
                     lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
                     
-                    fixed_c = torch.tensor([[0,0,0], [255,255,255], [0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]], dtype=torch.float32, device='cuda')
-                    fixed_w = torch.full((5,), self.base_weight, dtype=torch.float32, device='cuda')
+                    anchor_list = [[0,0,0], [255,255,255]]
+                    if self.use_base_colors:
+                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
+                    if self.use_base_rgb:
+                        anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
+                        
+                    fixed_c = torch.tensor(anchor_list, dtype=torch.float32, device='cuda')
+                    fixed_w = torch.full((len(anchor_list),), self.base_weight, dtype=torch.float32, device='cuda')
                     data_points = torch.cat([fixed_c, data_points])
                     weights = torch.cat([fixed_w, weights])
                     
@@ -568,13 +575,19 @@ class MV2PerfectFrameEncoder:
                 data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
                 
                 # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
-                if self.use_base_colors:
+                if self.use_base_colors or self.use_base_rgb:
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
                     msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
                     lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
                     
-                    fixed_c = np.array([[0,0,0], [255,255,255], [0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]], dtype=np.float32)
-                    fixed_w = np.full((5,), self.base_weight, dtype=np.float32)
+                    anchor_list = [[0,0,0], [255,255,255]]
+                    if self.use_base_colors:
+                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]])
+                    if self.use_base_rgb:
+                        anchor_list.extend([[lvl,0,0], [0,lvl,0], [0,0,lvl]])
+                        
+                    fixed_c = np.array(anchor_list, dtype=np.float32)
+                    fixed_w = np.full((len(anchor_list),), self.base_weight, dtype=np.float32)
                     data_points = np.vstack([fixed_c, data_points])
                     weights = np.concatenate([fixed_w, weights])
                     
@@ -841,6 +854,7 @@ if __name__ == "__main__":
     parser.add_argument("--roi-diff", action="store_true", help="프레임 단위의 화면 움직임(단순 차분, 매우 빠름)을 포착하여 팔레트 우선순위 부여")
     parser.add_argument("--roi-flow", action="store_true", help="픽셀 단위의 광학 흐름(벡터 추적, 정밀함)을 포착하여 빠른 움직임에 높은 팔레트 우선순위 부여")
     parser.add_argument("--base-colors", action="store_true", help="Black, White, Cyan, Magenta, Yellow 5원색을 강제로 팔레트에 삽입(Soft Anchor)하여 중간톤 뭉개짐 방지")
+    parser.add_argument("--base-rgb", action="store_true", help="[실험적] Red, Green, Blue 원색을 강제 앵커링 (팔레트 슬롯 낭비로 화질 저하가 일어날 수 있음)")
     parser.add_argument("--base-weight", type=float, default=2000.0, help="Base Color들의 K-Means 가중치 록인(Lock-in) 강도 (기본: 2000.0)")
     parser.add_argument("--cuda", action="store_true", help="NVIDIA CUDA(NVENC/NVDEC)를 사용하여 FFmpeg 다운스케일 렌더링을 매우 가속화합니다.")
     parser.add_argument("-ss", dest="start", default=None)
@@ -875,6 +889,7 @@ if __name__ == "__main__":
         use_roi_diff=args.roi_diff,
         use_roi_flow=args.roi_flow,
         use_base_colors=args.base_colors,
+        use_base_rgb=args.base_rgb,
         base_weight=args.base_weight,
         crop_up=args.crop_up,
         crop_left=args.crop_left,
