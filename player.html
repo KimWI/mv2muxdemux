@@ -299,6 +299,10 @@
         </div>
 
         <div class="panel">
+            <label style="cursor: pointer;" title="Allow playing when tab is in background"><input type="checkbox" id="toggle-bg-play" checked> 🔄 BG Play</label>
+        </div>
+
+        <div class="panel">
             <button id="toggle-overlay-btn" style="padding: 5px 10px; font-size: 14px;">Overlay ON</button>
             <label for="overlay-opacity" style="margin-left: 10px; font-size: 14px;">Opacity: <span
                     id="opacity-label">20%</span></label>
@@ -337,10 +341,41 @@
                 this.isPlaying = false;
                 this.startTime = 0;
                 this.pauseTime = 0;
-                this.animationId = null;
+                this.lastRenderedFrame = -1;
+                this.timerWorker = null;
                 this.fps = 15;
                 this.isMV1 = false; // 💡 MP4 Export 분기용 포맷 플래그
                 this.initDashboard();
+                this.initWorker();
+            }
+
+            initWorker() {
+                const workerCode = `
+                    let timerID = null;
+                    self.onmessage = function(e) {
+                        if (e.data === 'start') {
+                            if (timerID) clearInterval(timerID);
+                            timerID = setInterval(() => self.postMessage('tick'), 16); // Check ~60 times a second
+                        } else if (e.data === 'stop') {
+                            if (timerID) clearInterval(timerID);
+                            timerID = null;
+                        }
+                    };
+                `;
+                const blob = new Blob([workerCode], {type: 'application/javascript'});
+                this.timerWorker = new Worker(URL.createObjectURL(blob));
+                this.timerWorker.onmessage = () => {
+                    if (!this.isPlaying) return;
+                    const currentFrame = Math.floor((this.audioCtx.currentTime - this.startTime) * this.fps);
+                    if (currentFrame < this.totalFrames) {
+                        if (this.lastRenderedFrame !== currentFrame) {
+                            this.renderFrame(currentFrame);
+                            this.lastRenderedFrame = currentFrame;
+                        }
+                    } else {
+                        this.pause();
+                    }
+                };
             }
 
             initDashboard() {
@@ -367,13 +402,14 @@
 
             reset() {
                 this.isPlaying = false;
-                cancelAnimationFrame(this.animationId);
+                if (this.timerWorker) this.timerWorker.postMessage('stop');
                 if (this.audioSource) { try { this.audioSource.stop(); } catch (e) { } this.audioSource.disconnect(); this.audioSource = null; }
                 this.frames = [];
                 this.audioBuffer = null;
                 this.rawAudioBytes = null;
                 this.startTime = 0;
                 this.pauseTime = 0;
+                this.lastRenderedFrame = -1;
                 this.ctx.fillStyle = "black";
                 this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
                 document.getElementById('btn-play').disabled = true;
@@ -568,13 +604,7 @@
                 this.isPlaying = true;
                 document.getElementById('btn-play').disabled = true;
                 document.getElementById('btn-pause').disabled = false;
-                const loop = () => {
-                    if (!this.isPlaying) return;
-                    const currentFrame = Math.floor((this.audioCtx.currentTime - this.startTime) * this.fps);
-                    if (currentFrame < this.totalFrames) { this.renderFrame(currentFrame); this.animationId = requestAnimationFrame(loop); }
-                    else { this.pause(); }
-                };
-                loop();
+                if (this.timerWorker) this.timerWorker.postMessage('start');
             }
 
             pause() {
@@ -584,7 +614,7 @@
                     try { this.audioSource.stop(); } catch (e) { }
                 }
                 this.pauseTime = this.audioCtx.currentTime - this.startTime;
-                cancelAnimationFrame(this.animationId);
+                if (this.timerWorker) this.timerWorker.postMessage('stop');
                 document.getElementById('btn-play').disabled = false;
                 document.getElementById('btn-pause').disabled = true;
             }
@@ -727,7 +757,8 @@
         });
 
         document.addEventListener("visibilitychange", () => {
-            if (document.hidden && player.isPlaying) {
+            const allowBg = document.getElementById('toggle-bg-play').checked;
+            if (document.hidden && player.isPlaying && !allowBg) {
                 player.pause();
             }
         });
