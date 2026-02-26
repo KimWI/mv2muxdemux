@@ -110,6 +110,47 @@ def _apply_bayer8_dither_cuda(img_array, spread=32.0):
     out_t = torch.clamp(img_t + bayer_map, 0.0, 255.0)
     return out_t.cpu().numpy()
 
+def _kmeans_pytorch(data_tensor, n_clusters, init_centroids=None, n_init=10, max_iter=30, tol=1e-4):
+    device = data_tensor.device
+    N, D = data_tensor.shape
+    best_inertia = float('inf')
+    best_centroids = None
+    
+    if init_centroids is not None: n_init = 1
+        
+    for _ in range(n_init):
+        if init_centroids is not None:
+            centroids = torch.tensor(init_centroids, dtype=torch.float32, device=device)
+        else:
+            idx = torch.randperm(N)[:n_clusters]
+            centroids = data_tensor[idx].clone()
+            
+        for _ in range(max_iter):
+            distances = torch.cdist(data_tensor, centroids)
+            labels = torch.argmin(distances, dim=1)
+            
+            new_centroids = torch.zeros_like(centroids)
+            for k in range(n_clusters):
+                mask = (labels == k)
+                if mask.sum() > 0:
+                    new_centroids[k] = data_tensor[mask].mean(dim=0)
+                else:
+                    new_centroids[k] = data_tensor[torch.randint(0, N, (1,))].squeeze(0)
+                    
+            if torch.norm(new_centroids - centroids) < tol:
+                centroids = new_centroids
+                break
+            centroids = new_centroids
+            
+        distances = torch.cdist(data_tensor, centroids)
+        labels = torch.argmin(distances, dim=1)
+        inertia = distances[torch.arange(N), labels].pow(2).sum()
+        
+        if inertia < best_inertia:
+            best_inertia, best_centroids = inertia, centroids
+            
+    return best_centroids.cpu().numpy()
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _encode_vram_optimal_search(img_rgb_float, pal_888):
     h, w = 192, 256
@@ -363,11 +404,18 @@ class MV2PerfectFrameEncoder:
                     init_val = 'k-means++'
                     n_init_val = 3 
                     
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=30).fit(weighted_pixels)
-                    raw = [tuple(c) for c in km.cluster_centers_]
-                    self.prev_centroids = raw.copy() 
+                if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+                    data_t = torch.tensor(weighted_pixels, dtype=torch.float32, device='cuda')
+                    init_c = np.array(self.prev_centroids) if (self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters) else None
+                    centers = _kmeans_pytorch(data_t, n_clusters=n_clusters, init_centroids=init_c, n_init=3 if init_c is None else 1)
+                    raw = [tuple(c) for c in centers]
+                else:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=30).fit(weighted_pixels)
+                        raw = [tuple(c) for c in km.cluster_centers_]
+                        
+                self.prev_centroids = raw.copy() 
                     
             return raw, face_detected
 
