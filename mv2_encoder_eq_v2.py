@@ -549,10 +549,14 @@ class MV2PerfectFrameEncoder:
             if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
                 data_points, weights = extract_top2_colors_gpu(img_np, weight_mask)
                 
-                # 5. Base Color 강제 주입 (Soft Anchors)
+                # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
                 if self.use_base_colors:
-                    # BT.601 명암 가중치(R:0.299, G:0.587, B:0.114) 기반으로 측정된 정확한 50% 중간 밝기 원색들
-                    fixed_c = torch.tensor([[0,0,0], [255,255,255], [0,183,183], [255,0,255], [144,144,0]], dtype=torch.float32, device='cuda')
+                    # 현재 프레임의 전체 밝기(BT.601) 평균 계산
+                    avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
+                    msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
+                    lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
+                    
+                    fixed_c = torch.tensor([[0,0,0], [255,255,255], [0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]], dtype=torch.float32, device='cuda')
                     fixed_w = torch.full((5,), self.base_weight, dtype=torch.float32, device='cuda')
                     data_points = torch.cat([fixed_c, data_points])
                     weights = torch.cat([fixed_w, weights])
@@ -561,9 +565,13 @@ class MV2PerfectFrameEncoder:
             else:
                 data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
                 
-                # 5. Base Color 강제 주입 (Soft Anchors)
+                # 5. Base Color 동적 주입 (Soft Anchors - 8-Level MSX)
                 if self.use_base_colors:
-                    fixed_c = np.array([[0,0,0], [255,255,255], [0,183,183], [255,0,255], [144,144,0]], dtype=np.float32)
+                    avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
+                    msx_levels = np.array([36, 73, 109, 146, 182, 219, 255])
+                    lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
+                    
+                    fixed_c = np.array([[0,0,0], [255,255,255], [0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0]], dtype=np.float32)
                     fixed_w = np.full((5,), self.base_weight, dtype=np.float32)
                     data_points = np.vstack([fixed_c, data_points])
                     weights = np.concatenate([fixed_w, weights])
