@@ -41,14 +41,13 @@
         }
 
         #msx-screen {
-            width: 768px;
-            height: 576px;
+            width: 100%;
+            height: 100%;
             max-width: 100%;
-            max-height: 55vh;
+            max-height: 100%;
             object-fit: contain;
             image-rendering: pixelated;
             display: block;
-            transition: width 0.2s, height 0.2s;
         }
 
         #screen-wrapper:fullscreen #msx-screen {
@@ -60,18 +59,20 @@
         #video-container {
             position: relative;
             display: inline-block;
-            max-width: 100%;
+            max-width: min(100%, calc(55vh * 4 / 3));
             max-height: 55vh;
+            aspect-ratio: 4 / 3;
+            width: 768px;
+            /* Managed by JS slider */
+            height: auto;
+            transition: width 0.2s;
         }
 
         #screen-wrapper:fullscreen #video-container {
-            max-width: none;
+            max-width: min(100vw, calc(100vh * 4 / 3));
             max-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 100vw;
-            height: 100vh;
+            width: 100vw !important;
+            height: auto !important;
         }
 
         #eq-overlay {
@@ -660,9 +661,9 @@
         document.getElementById('scale-slider').addEventListener('input', e => {
             const s = e.target.value;
             document.getElementById('scale-label').innerText = s + 'x';
-            const canvas = document.getElementById('msx-screen');
-            canvas.style.width = (256 * s) + 'px';
-            canvas.style.height = (192 * s) + 'px';
+            const container = document.getElementById('video-container');
+            container.style.width = (256 * s) + 'px';
+            container.style.height = 'auto'; // let aspect-ratio compute height naturally
         });
 
         document.getElementById('toggle-dashboard').addEventListener('change', e => {
