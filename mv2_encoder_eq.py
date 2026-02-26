@@ -89,6 +89,27 @@ def _apply_bayer8_dither(img_array, spread=36.0):
                 temp_img[y, x, c] = min(max(img_array[y, x, c] + offset, 0.0), 255.0)
     return temp_img
 
+def _apply_bayer_dither_cuda(img_array, spread=30.0):
+    h, w = 192, 256
+    img_t = torch.tensor(img_array, dtype=torch.float32, device='cuda')
+    bayer_4x4 = torch.tensor([[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]], dtype=torch.float32, device='cuda') / 16.0 - 0.5
+    bayer_map = bayer_4x4.repeat(h // 4, w // 4) * spread
+    bayer_map = bayer_map.unsqueeze(2)
+    out_t = torch.clamp(img_t + bayer_map, 0.0, 255.0)
+    return out_t.cpu().numpy()
+
+def _apply_bayer8_dither_cuda(img_array, spread=32.0):
+    h, w = 192, 256
+    img_t = torch.tensor(img_array, dtype=torch.float32, device='cuda')
+    bayer_8x8 = torch.tensor([
+        [0,32,8,40,2,34,10,42],[48,16,56,24,50,18,58,26],[12,44,4,36,14,46,6,38],[60,28,52,20,62,30,54,22],
+        [3,35,11,43,1,33,9,41],[51,19,59,27,49,17,57,25],[15,47,7,39,13,45,5,37],[63,31,55,23,61,29,53,21]
+    ], dtype=torch.float32, device='cuda') / 64.0 - 0.5
+    bayer_map = bayer_8x8.repeat(h // 8, w // 8) * spread
+    bayer_map = bayer_map.unsqueeze(2)
+    out_t = torch.clamp(img_t + bayer_map, 0.0, 255.0)
+    return out_t.cpu().numpy()
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _encode_vram_optimal_search(img_rgb_float, pal_888):
     h, w = 192, 256
@@ -479,9 +500,11 @@ class MV2PerfectFrameEncoder:
             img_256 = cv2.resize(img_512, (256, 192), interpolation=cv2.INTER_AREA)
             
             if self.dither_mode == 'bayer':
-                img_rgb_diffused = _apply_bayer_dither(img_256.astype(np.float32))
+                if self.use_cuda and HAS_TORCH and torch.cuda.is_available(): img_rgb_diffused = _apply_bayer_dither_cuda(img_256.astype(np.float32))
+                else: img_rgb_diffused = _apply_bayer_dither(img_256.astype(np.float32))
             elif self.dither_mode == 'bayer8':
-                img_rgb_diffused = _apply_bayer8_dither(img_256.astype(np.float32))
+                if self.use_cuda and HAS_TORCH and torch.cuda.is_available(): img_rgb_diffused = _apply_bayer8_dither_cuda(img_256.astype(np.float32))
+                else: img_rgb_diffused = _apply_bayer8_dither(img_256.astype(np.float32))
             else:
                 dither_flag = 2 if self.dither_mode == 'jjn' else (1 if self.dither_mode == 'fs' else 0)
                 img_rgb_diffused = _apply_dither_rgb(img_256, pal_888_np, dither_flag)
