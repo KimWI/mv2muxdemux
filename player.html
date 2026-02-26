@@ -289,6 +289,18 @@
         <button id="btn-pause" disabled>⏸ Pause</button>
         <button id="btn-export" disabled>💾 Export MP4</button>
 
+        <div class="panel" style="width: 100%; max-width: 600px; display: flex; align-items: center; justify-content: space-between; padding: 10px 0;">
+            <span id="time-current" style="font-family: monospace;">00:00</span>
+            <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" style="flex-grow: 1; margin: 0 10px;" disabled>
+            <span id="time-total" style="font-family: monospace;">00:00</span>
+        </div>
+
+        <div class="panel" style="width: 100%; max-width: 600px; display: flex; align-items: center; justify-content: space-between; padding: 10px 0;">
+            <span id="time-current" style="font-family: monospace;">00:00</span>
+            <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" style="flex-grow: 1; margin: 0 10px;" disabled>
+            <span id="time-total" style="font-family: monospace;">00:00</span>
+        </div>
+
         <div class="panel">
             <label for="scale-slider">📺 Size: <span id="scale-label">3x</span></label>
             <input type="range" id="scale-slider" min="1" max="5" step="1" value="3">
@@ -349,6 +361,12 @@
                 this.initWorker();
             }
 
+            formatTime(seconds) {
+                const m = Math.floor(seconds / 60);
+                const s = Math.floor(seconds % 60);
+                return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+            }
+
             initWorker() {
                 const workerCode = `
                     let timerID = null;
@@ -365,8 +383,18 @@
                 const blob = new Blob([workerCode], {type: 'application/javascript'});
                 this.timerWorker = new Worker(URL.createObjectURL(blob));
                 this.timerWorker.onmessage = () => {
-                    if (!this.isPlaying) return;
-                    const currentFrame = Math.floor((this.audioCtx.currentTime - this.startTime) * this.fps);
+                    if (!this.isPlaying || this.isScrubbing) return;
+                    let currentTime = this.audioCtx.currentTime - this.startTime;
+                    if (currentTime > this.duration) currentTime = this.duration;
+                    
+                    const currentFrame = Math.floor(currentTime * this.fps);
+                    
+                    if (!this.isScrubbing) {
+                        const slider = document.getElementById('seek-slider');
+                        if(this.duration > 0) slider.value = (currentTime / this.duration) * 100;
+                        document.getElementById('time-current').innerText = this.formatTime(currentTime);
+                    }
+
                     if (currentFrame < this.totalFrames) {
                         if (this.lastRenderedFrame !== currentFrame) {
                             this.renderFrame(currentFrame);
@@ -416,6 +444,10 @@
                 document.getElementById('btn-pause').disabled = true;
                 document.getElementById('btn-export').disabled = true;
                 document.getElementById('btn-fullscreen').disabled = true;
+                const sl = document.getElementById('seek-slider');
+                sl.value = 0; sl.disabled = true;
+                document.getElementById('time-current').innerText = "00:00";
+                document.getElementById('time-total').innerText = "00:00";
             }
 
             async loadFile(file) {
@@ -448,6 +480,10 @@
                     document.getElementById('btn-play').disabled = false;
                     document.getElementById('btn-export').disabled = false;
                     document.getElementById('btn-fullscreen').disabled = false;
+                    
+                    this.duration = this.totalFrames / this.fps;
+                    document.getElementById('time-total').innerText = this.formatTime(this.duration);
+                    document.getElementById('seek-slider').disabled = false;
                 } catch (err) {
                     document.getElementById('status').innerText = `에러: ${err.message}`;
                     document.getElementById('status').style.color = "#ff4444";
@@ -613,7 +649,9 @@
                 if (this.audioSource) {
                     try { this.audioSource.stop(); } catch (e) { }
                 }
-                this.pauseTime = this.audioCtx.currentTime - this.startTime;
+                if (!this.isScrubbing) {
+                    this.pauseTime = this.audioCtx.currentTime - this.startTime;
+                }
                 if (this.timerWorker) this.timerWorker.postMessage('stop');
                 document.getElementById('btn-play').disabled = false;
                 document.getElementById('btn-pause').disabled = true;
@@ -687,6 +725,35 @@
         document.getElementById('btn-play').addEventListener('click', () => player.play());
         document.getElementById('btn-pause').addEventListener('click', () => player.pause());
         document.getElementById('btn-export').addEventListener('click', () => player.exportMP4());
+
+        const seekSlider = document.getElementById('seek-slider');
+        let wasPlayingBeforeSeek = false;
+
+        seekSlider.addEventListener('input', e => {
+            if (!player.frames || player.frames.length === 0) return;
+            if (!player.isScrubbing) {
+                wasPlayingBeforeSeek = player.isPlaying;
+                player.isScrubbing = true;
+                if (player.isPlaying) player.pause();
+            }
+            const pct = parseFloat(e.target.value) / 100;
+            const targetTime = pct * player.duration;
+            document.getElementById('time-current').innerText = player.formatTime(targetTime);
+            
+            const targetFrame = Math.min(Math.floor(targetTime * player.fps), player.totalFrames - 1);
+            player.renderFrame(targetFrame);
+        });
+
+        seekSlider.addEventListener('change', e => {
+            if (!player.frames || player.frames.length === 0) return;
+            const pct = parseFloat(e.target.value) / 100;
+            player.pauseTime = pct * player.duration;
+            player.isScrubbing = false;
+            
+            if (wasPlayingBeforeSeek) {
+                player.play();
+            }
+        });
 
         document.getElementById('scale-slider').addEventListener('input', e => {
             const s = e.target.value;
