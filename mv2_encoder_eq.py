@@ -154,7 +154,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, crop_up=0, crop_left=0):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, crop_up=0, crop_left=0, use_cuda=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -172,6 +172,7 @@ class MV2PerfectFrameEncoder:
         self.roi_center_spread = roi_center_spread
         self.crop_up = crop_up
         self.crop_left = crop_left
+        self.use_cuda = use_cuda
 
         self.prev_hist = None
         self.prev_centroids = None
@@ -355,7 +356,10 @@ class MV2PerfectFrameEncoder:
             else: 
                 vf_string = "scale=512:384:flags=lanczos"
                 
-            subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-an", "-vf", vf_string, "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", self.temp_vid], capture_output=True)
+            input_args = ["-hwaccel", "cuda", "-i", self.input_video] if self.use_cuda else ["-i", self.input_video]
+            codec_args = ["-c:v", "h264_nvenc", "-preset", "p1"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
+            
+            subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-an", "-vf", vf_string, "-r", "15"] + codec_args + ["-crf", "10", self.temp_vid], capture_output=True)
             cap = cv2.VideoCapture(self.temp_vid)
             orig_fps = 15.0
         else:
@@ -487,6 +491,7 @@ if __name__ == "__main__":
     parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
     parser.add_argument("--roi-center", action="store_true", help="화면 중앙부에 팔레트 색상을 집중 할당하는 2D 가우시안 ROI 패턴 적용 (KMeans 전용)")
     parser.add_argument("--roi-center-spread", type=float, default=3.0, help="중앙 ROI 퍼짐 정도 (작을수록 화면 전체로 골고루 퍼짐, 기본값: 3.0 = 화면너비의 1/3 집중)")
+    parser.add_argument("--cuda", action="store_true", help="NVIDIA CUDA(NVENC/NVDEC)를 사용하여 FFmpeg 다운스케일 렌더링을 매우 가속화합니다.")
     parser.add_argument("-ss", dest="start", default=None)
     parser.add_argument("-to", dest="end", default=None)
     parser.add_argument("--aspect", choices=['pad', 'crop', 'force'], default='pad')
@@ -516,5 +521,6 @@ if __name__ == "__main__":
         use_roi_center=args.roi_center,
         roi_center_spread=args.roi_center_spread,
         crop_up=args.crop_up,
-        crop_left=args.crop_left
+        crop_left=args.crop_left,
+        use_cuda=args.cuda
     ).run()

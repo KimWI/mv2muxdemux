@@ -154,7 +154,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, crop_up=0, crop_left=0):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, crop_up=0, crop_left=0, use_cuda=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -168,8 +168,11 @@ class MV2PerfectFrameEncoder:
         self.scene_thresh = scene_thresh  
         self.debug_frames = debug_frames 
         self.use_roi_face = use_roi_face
+        self.use_roi_center = use_roi_center
+        self.roi_center_spread = roi_center_spread
         self.crop_up = crop_up
         self.crop_left = crop_left
+        self.use_cuda = use_cuda
 
         self.prev_hist = None
         self.prev_centroids = None
@@ -229,7 +232,25 @@ class MV2PerfectFrameEncoder:
                     weight_mask[y:y+h, x:x+w] = 30
                     face_detected = True
 
-            # 3. 마스크(가중치)를 바탕으로 실제 픽셀 배열을 물리적으로 복제 (Numpy 매직)
+            # 3. 중앙 집중 ROI 가중치 (가우시안 분포로 중앙일수록 높은 가중치)
+            if self.use_roi_center:
+                h, w = gray.shape
+                # Meshgrid 
+                y, x = np.ogrid[:h, :w]
+                center_y, center_x = h / 2, w / 2
+                
+                # 정규화된 2D 가우시안 마스크 (중앙 1.0, 외곽 0.0)
+                # 시그마 조정하여 집중도 변경 (사용자가 넘긴 스프레드 계수로 나누기)
+                sigma_x, sigma_y = w / self.roi_center_spread, h / self.roi_center_spread
+                gaussian_mask = np.exp(-(((x - center_x) ** 2) / (2 * sigma_x ** 2) + ((y - center_y) ** 2) / (2 * sigma_y ** 2)))
+                
+                # 강도 설정: 중앙은 최대 20배 가중치, 외곽은 기본값 + Alpha
+                roi_center_weight = (gaussian_mask * 20).astype(np.uint8)
+                
+                # 기존 마스크(엣지나 얼굴)를 덮어쓰지 않고 가장 큰 가중치를 합산/초이스 
+                weight_mask = np.maximum(weight_mask, roi_center_weight)
+
+            # 4. 마스크(가중치)를 바탕으로 실제 픽셀 배열을 물리적으로 복제 (Numpy 매직)
             flat_img = img_np.reshape(-1, 3)
             flat_mask = weight_mask.reshape(-1)
             weighted_pixels = np.repeat(flat_img, flat_mask, axis=0)
@@ -298,7 +319,10 @@ class MV2PerfectFrameEncoder:
             else: 
                 vf_string = "scale=512:384:flags=lanczos"
                 
-            subprocess.run(["ffmpeg", "-y"] + time_args + ["-i", self.input_video, "-an", "-vf", vf_string, "-r", "15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", self.temp_vid], capture_output=True)
+            input_args = ["-hwaccel", "cuda", "-i", self.input_video] if self.use_cuda else ["-i", self.input_video]
+            codec_args = ["-c:v", "h264_nvenc", "-preset", "p1"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
+            
+            subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-an", "-vf", vf_string, "-r", "15"] + codec_args + ["-crf", "10", self.temp_vid], capture_output=True)
             cap = cv2.VideoCapture(self.temp_vid)
             orig_fps = 15.0
         else:
@@ -404,8 +428,11 @@ if __name__ == "__main__":
     parser.add_argument("--temporal", action="store_true", help="[추천] 씬 감지를 포함한 팔레트 시간적 일관성(깜빡임 방지) 활성화")
     parser.add_argument("--scene-thresh", type=float, default=0.85, help="씬 전환 감지 임계값 (기본: 0.85 / 예민하게: 0.93)")
     
-    # 💡 [추가] 얼굴 인식 집중 ROI 옵션 (K-Means 전용)
+    # 💡 [추가] 얼굴 인식 및 화면 중앙 집중 패턴 (K-Means 전용)
     parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
+    parser.add_argument("--roi-center", action="store_true", help="화면 중앙부에 팔레트 색상을 집중 할당하는 2D 가우시안 ROI 패턴 적용 (KMeans 전용)")
+    parser.add_argument("--roi-center-spread", type=float, default=3.0, help="중앙 ROI 퍼짐 정도 (작을수록 화면 전체로 균등. 기본: 3.0)")
+    parser.add_argument("--cuda", action="store_true", help="NVIDIA CUDA(NVENC/NVDEC)를 사용하여 FFmpeg 다운스케일 렌더링을 매우 가속화합니다.")
     
     parser.add_argument("-ss", dest="start", default=None)
     parser.add_argument("-to", dest="end", default=None)
@@ -433,6 +460,9 @@ if __name__ == "__main__":
         debug_frames=args.debug_frames,
         scene_thresh=args.scene_thresh,
         use_roi_face=args.roi_face,
+        use_roi_center=args.roi_center,
+        roi_center_spread=args.roi_center_spread,
         crop_up=args.crop_up,
-        crop_left=args.crop_left
+        crop_left=args.crop_left,
+        use_cuda=args.cuda
         ).run()
