@@ -551,7 +551,8 @@ class MV2PerfectFrameEncoder:
                 
                 # 5. Base Color 강제 주입 (Soft Anchors)
                 if self.use_base_colors:
-                    fixed_c = torch.tensor([[0,0,0], [255,255,255], [0,128,128], [128,0,128], [128,128,0]], dtype=torch.float32, device='cuda')
+                    # BT.601 명암 가중치(R:0.299, G:0.587, B:0.114) 기반으로 측정된 정확한 50% 중간 밝기 원색들
+                    fixed_c = torch.tensor([[0,0,0], [255,255,255], [0,183,183], [255,0,255], [144,144,0]], dtype=torch.float32, device='cuda')
                     fixed_w = torch.full((5,), self.base_weight, dtype=torch.float32, device='cuda')
                     data_points = torch.cat([fixed_c, data_points])
                     weights = torch.cat([fixed_w, weights])
@@ -562,7 +563,7 @@ class MV2PerfectFrameEncoder:
                 
                 # 5. Base Color 강제 주입 (Soft Anchors)
                 if self.use_base_colors:
-                    fixed_c = np.array([[0,0,0], [255,255,255], [0,128,128], [128,0,128], [128,128,0]], dtype=np.float32)
+                    fixed_c = np.array([[0,0,0], [255,255,255], [0,183,183], [255,0,255], [144,144,0]], dtype=np.float32)
                     fixed_w = np.full((5,), self.base_weight, dtype=np.float32)
                     data_points = np.vstack([fixed_c, data_points])
                     weights = np.concatenate([fixed_w, weights])
