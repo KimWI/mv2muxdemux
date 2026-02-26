@@ -520,14 +520,31 @@ class MV2PerfectFrameEncoder:
             sort_idx = np.argsort(-counts)
             top_packed = unique_packed[sort_idx]
             
-            raw = []
+            # 💡 [AVGEN 오리지널 에뮬레이션 2단계: 0~5번 슬롯 강제 고정 및 씬 밝기별 스위칭]
+            avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
+            # 평균 밝기가 60을 넘으면 Level 4(146), 어두우면 Level 2(73) 사용
+            lvl = 146 if avg_lum > 60 else 73
+            
+            # 파이썬 인코더 로직상 0번(Black)은 여기서 제외하고 배출 (1~15번 슬롯 확보용)
+            fixed_colors = [
+                (255, 255, 255), # 1: White
+                (0, lvl, lvl),   # 2: Cyan
+                (lvl, lvl, 0),   # 3: Yellow
+                (lvl, 0, lvl),   # 4: Magenta
+                (lvl, 0, 0)      # 5: Red
+            ]
+            
+            raw = list(fixed_colors)
+            anchor_set = set([(0,0,0)] + fixed_colors)
+            
             for p in top_packed:
                 c = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF)
-                if tuple(c) != (0, 0, 0): # 제외: 0번은 항상 VDP 하드웨어 블랙으로 고정됨
-                    raw.append(tuple(int(v) for v in c))
+                ct = tuple(int(v) for v in c)
+                if ct not in anchor_set:
+                    raw.append(ct)
                 if len(raw) == 15:
                     break
-            
+                    
             return raw, face_detected
 
         n_colors = 15
@@ -800,7 +817,8 @@ class MV2PerfectFrameEncoder:
             while len(final_pal_888) < 15: final_pal_888.append((0,0,0))
             final_pal_888 = final_pal_888[:15]
             
-            final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+            if not self.use_avgen_color:
+                final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
             
             pal_333 = [tuple(int(round((c/255.0)*7)) for c in rgb) for rgb in final_pal_888]
             pal_888_np = np.zeros((16, 3), dtype=np.int32)
