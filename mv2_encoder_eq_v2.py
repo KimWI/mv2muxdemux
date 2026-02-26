@@ -864,7 +864,15 @@ class MV2PerfectFrameEncoder:
             final_pal_888 = raw_pal
             while len(final_pal_888) < 15: final_pal_888.append((0,0,0))
             final_pal_888 = final_pal_888[:15]
-            final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+            
+            if self.use_avgen_color:
+                # [AVGEN 모드] 0~5번은 고정색(흑,백,C,M,Y,R)으로 강제 못박기. 나머지 9색만 밝기로 정렬
+                fixed_part = final_pal_888[:6]
+                dynamic_part = final_pal_888[6:]
+                dynamic_part.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+                final_pal_888 = fixed_part + dynamic_part
+            else:
+                final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
             
             pal_333 = [tuple(int(round((c/255.0)*7)) for c in rgb) for rgb in final_pal_888]
             pal_888_np = np.zeros((16, 3), dtype=np.int32)
