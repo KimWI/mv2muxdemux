@@ -705,10 +705,26 @@ class MV2PerfectFrameEncoder:
                         top_indices = np.argsort(pool_weights)[::-1][:top_k]
                         selected_centers = self.prime_pool[top_indices]
                         
-                    raw = [(255,255,255)] + [tuple(c) for c in selected_centers]
+                    raw = [tuple(c) for c in selected_centers]
                     self.prev_centroids = None
-                    return raw, face_detected
+
+                # ------ AVGEN COLOR POST-PROCESSING ------
+                if getattr(self, 'use_avgen_color', False) and 'anchor_list' in locals() and anchor_list:
+                    # 1. K-Means가 내보낸 raw 배열에서 고정색 후보(anchor_list)와 너무 비슷한 색은 제거 (중복 방지)
+                    filtered_raw = []
+                    for c in raw:
+                        is_dup = False
+                        for ac in anchor_list:
+                            if sum((a - b)**2 for a, b in zip(c, ac)) < 150: # 거리 차이 미만이면 중복으로 간주
+                                is_dup = True
+                                break
+                        if not is_dup: filtered_raw.append(c)
+                    
+                    # 2. 강제로 0~5번 슬롯에 6색 박아넣기
+                    raw = [tuple(c) for c in anchor_list] + filtered_raw
+                    
                 # -----------------------------------------
+                return [(255,255,255)] + raw if getattr(self, 'use_prime_color', False) and self.prime_pool is not None else raw, face_detected
                 
                 if self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters:
                     init_val = np.array(self.prev_centroids)
@@ -732,7 +748,19 @@ class MV2PerfectFrameEncoder:
                         raw = [tuple(c) for c in km.cluster_centers_]
                         
                 self.prev_centroids = raw.copy() 
-                    
+                
+                # ------ AVGEN COLOR POST-PROCESSING (Normal KMeans) ------
+                if getattr(self, 'use_avgen_color', False) and 'anchor_list' in locals() and anchor_list:
+                    filtered_raw = []
+                    for c in raw:
+                        is_dup = False
+                        for ac in anchor_list:
+                            if sum((a - b)**2 for a, b in zip(c, ac)) < 150:
+                                is_dup = True
+                                break
+                        if not is_dup: filtered_raw.append(c)
+                    raw = [tuple(c) for c in anchor_list] + filtered_raw
+
             return raw, face_detected
 
         else:
