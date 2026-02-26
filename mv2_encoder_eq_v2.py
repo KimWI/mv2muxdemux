@@ -433,7 +433,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, crop_up=0, crop_left=0, use_cuda=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, crop_up=0, crop_left=0, use_cuda=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -449,12 +449,15 @@ class MV2PerfectFrameEncoder:
         self.use_roi_face = use_roi_face 
         self.use_roi_center = use_roi_center
         self.roi_center_spread = roi_center_spread
+        self.use_roi_diff = use_roi_diff
+        self.use_roi_flow = use_roi_flow
         self.crop_up = crop_up
         self.crop_left = crop_left
         self.use_cuda = use_cuda
 
         self.prev_hist = None
         self.prev_centroids = None
+        self.prev_gray_roi = None
         
         if self.use_roi_face:
             cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
@@ -493,22 +496,22 @@ class MV2PerfectFrameEncoder:
         n_colors = 15
         
         if self.quant_algo == 'kmeans':
-            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            curr_gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
             
-            weight_mask = np.ones(gray.shape, dtype=np.uint8)
-            edges = cv2.Canny(gray, 50, 150)
+            weight_mask = np.ones(curr_gray.shape, dtype=np.uint8)
+            edges = cv2.Canny(curr_gray, 50, 150)
             weight_mask[edges == 255] = 5
             
             face_detected = False
             if self.use_roi_face:
-                faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+                faces = self.face_cascade.detectMultiScale(curr_gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
                 for (x, y, w, h) in faces:
                     weight_mask[y:y+h, x:x+w] = 30
                     face_detected = True
 
             # 3. 중앙 집중 ROI 가중치 (가우시안 분포로 중앙일수록 높은 가중치)
             if self.use_roi_center:
-                h, w = gray.shape
+                h, w = curr_gray.shape
                 # Meshgrid 
                 y, x = np.ogrid[:h, :w]
                 center_y, center_x = h / 2, w / 2
@@ -523,6 +526,22 @@ class MV2PerfectFrameEncoder:
                 
                 # 기존 마스크(엣지나 얼굴)를 덮어쓰지 않고 가장 큰 가중치를 합산/초이스 
                 weight_mask = np.maximum(weight_mask, roi_center_weight)
+
+            # 3-B. 시간적 움직임 추적 가중치 (Temporal Motion ROI)
+            if self.prev_gray_roi is not None:
+                if self.use_roi_diff:
+                    diff = cv2.absdiff(curr_gray, self.prev_gray_roi)
+                    _, mask_diff = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+                    roi_diff_weight = np.where(mask_diff > 0, 20, 1).astype(np.uint8)
+                    weight_mask = np.maximum(weight_mask, roi_diff_weight)
+                    
+                if self.use_roi_flow:
+                    flow = cv2.calcOpticalFlowFarneback(self.prev_gray_roi, curr_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                    mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+                    roi_flow_weight = np.clip(mag * 2.0, 1, 25).astype(np.uint8)
+                    weight_mask = np.maximum(weight_mask, roi_flow_weight)
+                    
+            self.prev_gray_roi = curr_gray
 
             # 4. CPU/GPU 공통: 마스크를 기반으로 픽셀을 가장 밀도 높은 색상 탑2로 압축
             if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
@@ -788,6 +807,8 @@ if __name__ == "__main__":
     parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
     parser.add_argument("--roi-center", action="store_true", help="화면 중앙부에 팔레트 색상을 집중 할당하는 2D 가우시안 ROI 패턴 적용 (KMeans 전용)")
     parser.add_argument("--roi-center-spread", type=float, default=3.0, help="중앙 ROI 퍼짐 정도 (작을수록 화면 전체로 골고루 퍼짐, 기본값: 3.0 = 화면너비의 1/3 집중)")
+    parser.add_argument("--roi-diff", action="store_true", help="프레임 단위의 화면 움직임(단순 차분, 매우 빠름)을 포착하여 팔레트 우선순위 부여")
+    parser.add_argument("--roi-flow", action="store_true", help="픽셀 단위의 광학 흐름(벡터 추적, 정밀함)을 포착하여 빠른 움직임에 높은 팔레트 우선순위 부여")
     parser.add_argument("--cuda", action="store_true", help="NVIDIA CUDA(NVENC/NVDEC)를 사용하여 FFmpeg 다운스케일 렌더링을 매우 가속화합니다.")
     parser.add_argument("-ss", dest="start", default=None)
     parser.add_argument("-to", dest="end", default=None)
@@ -817,6 +838,8 @@ if __name__ == "__main__":
         use_roi_face=args.roi_face,
         use_roi_center=args.roi_center,
         roi_center_spread=args.roi_center_spread,
+        use_roi_diff=args.roi_diff,
+        use_roi_flow=args.roi_flow,
         crop_up=args.crop_up,
         crop_left=args.crop_left,
         use_cuda=args.cuda
