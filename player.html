@@ -28,6 +28,18 @@
             box-sizing: border-box;
         }
 
+        #screen-wrapper:fullscreen {
+            border: none;
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            max-height: none;
+        }
+
+        #screen-wrapper::backdrop {
+            background-color: #000;
+        }
+
         #msx-screen {
             width: 768px;
             height: 576px;
@@ -37,6 +49,12 @@
             image-rendering: pixelated;
             display: block;
             transition: width 0.2s, height 0.2s;
+        }
+
+        #screen-wrapper:fullscreen #msx-screen {
+            width: 100vw;
+            height: 100vh;
+            max-height: 100vh;
         }
 
         #eq-overlay {
@@ -182,6 +200,15 @@
         #btn-export:hover {
             background-color: #218838;
         }
+
+        #btn-fullscreen {
+            background-color: #007bff;
+            font-weight: bold;
+        }
+
+        #btn-fullscreen:hover {
+            background-color: #0056b3;
+        }
     </style>
 </head>
 
@@ -209,6 +236,7 @@
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
         <button id="btn-export" disabled>💾 Export MP4</button>
+        <button id="btn-fullscreen" disabled>⛶ Fullscreen</button>
 
         <div class="panel">
             <label for="scale-slider">📺 Size: <span id="scale-label">3x</span></label>
@@ -300,6 +328,7 @@
                 document.getElementById('btn-play').disabled = true;
                 document.getElementById('btn-pause').disabled = true;
                 document.getElementById('btn-export').disabled = true;
+                document.getElementById('btn-fullscreen').disabled = true;
             }
 
             async loadFile(file) {
@@ -331,6 +360,7 @@
                     document.getElementById('status').style.color = "#4CAF50";
                     document.getElementById('btn-play').disabled = false;
                     document.getElementById('btn-export').disabled = false;
+                    document.getElementById('btn-fullscreen').disabled = false;
                 } catch (err) {
                     document.getElementById('status').innerText = `에러: ${err.message}`;
                     document.getElementById('status').style.color = "#ff4444";
@@ -603,6 +633,27 @@
             document.getElementById('opacity-label').innerText = Math.round(alpha * 100) + '%';
             const bars = document.getElementsByClassName('overlay-eq-bar');
             for (let b of bars) b.style.backgroundColor = `rgba(255, 255, 255, ${alpha})`;
+        });
+
+        document.getElementById('btn-fullscreen').addEventListener('click', () => {
+            const wrapper = document.getElementById('screen-wrapper');
+            if (!document.fullscreenElement) {
+                if (wrapper.requestFullscreen) {
+                    wrapper.requestFullscreen();
+                } else if (wrapper.webkitRequestFullscreen) {
+                    wrapper.webkitRequestFullscreen();
+                } else if (wrapper.msRequestFullscreen) {
+                    wrapper.msRequestFullscreen();
+                }
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+            }
         });
 
         document.addEventListener("visibilitychange", () => {
