@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>MSX2 MV1 Player & Recorder (v1.00 Only)</title>
+    <script src="coi-serviceworker.js"></script>
+    <script src="ffmpeg.js"></script>
+    <style>
+        body { background-color: #111; color: #eee; font-family: sans-serif; text-align: center; margin-top: 30px; }
+        #screen-wrapper { position: relative; display: inline-block; box-shadow: 0 0 20px rgba(0,0,0,0.8); border: 4px solid #333; background-color: #000; }
+        #msx-screen { width: 768px; height: 576px; image-rendering: pixelated; display: block; transition: width 0.2s, height 0.2s; }
+        #eq-overlay { position: absolute; top: 0; left: 0; width: 25%; height: 25%; background-color: transparent; pointer-events: none; display: none; align-items: flex-end; justify-content: space-between; padding: 2%; box-sizing: border-box; gap: 2px; z-index: 10; }
+        .overlay-eq-bar { flex: 1; background-color: rgba(255, 255, 255, 0.2); height: 0%; border-radius: 2px 2px 0 0; transition: height 0.05s ease-out; }
+        .controls { margin-top: 20px; display: flex; justify-content: center; gap: 15px; align-items: center; flex-wrap: wrap; }
+        button, input[type="file"] { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #333; color: white; border: 1px solid #555; border-radius: 4px; }
+        button:hover { background: #555; }
+        button:disabled { background: #222; color: #666; cursor: not-allowed; }
+        .panel { background: #222; padding: 10px 20px; border-radius: 8px; border: 1px solid #444; display: flex; align-items: center; gap: 10px; }
+        #status { margin-top: 15px; font-weight: bold; color: #4CAF50; }
+        
+        #dashboard { display: none; justify-content: center; gap: 40px; margin-top: 20px; padding: 15px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; width: fit-content; margin-left: auto; margin-right: auto; }
+        .dash-section { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .dash-title { font-size: 12px; color: #888; letter-spacing: 1px; }
+        #vis-palette { display: flex; gap: 2px; }
+        .pal-box { width: 24px; height: 24px; border: 1px solid #555; border-radius: 2px; }
+        #vis-eq { display: flex; gap: 3px; align-items: flex-end; height: 60px; border-bottom: 2px solid #555; padding-bottom: 2px; width: 280px; justify-content: center; }
+        .eq-bar { width: 12px; background-color: #00ffcc; border-radius: 2px 2px 0 0; transition: height 0.05s ease-out; }
+        .eq-center-divider { width: 2px; height: 10px; background-color: #666; margin: 0 4px; }
+        
+        #btn-export { background-color: #28a745; font-weight: bold; }
+        #btn-export:hover { background-color: #218838; }
+    </style>
+</head>
+<body>
+
+    <h2>MSX2 MV1 Player & Recorder (v1.00 Only)</h2>
+    
+    <div id="screen-wrapper">
+        <canvas id="msx-screen" width="256" height="192"></canvas>
+        <div id="eq-overlay">
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+            <div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div><div class="overlay-eq-bar"></div>
+        </div>
+    </div>
+    
+    <div class="controls">
+        <input type="file" id="file-input" accept=".mv" />
+        <button id="btn-play" disabled>▶ Play</button>
+        <button id="btn-pause" disabled>⏸ Pause</button>
+        <button id="btn-export" disabled>💾 Export MP4</button>
+        
+        <div class="panel">
+            <label for="scale-slider">📺 Size: <span id="scale-label">3x</span></label>
+            <input type="range" id="scale-slider" min="3" max="5" step="1" value="3">
+        </div>
+        
+        <div class="panel">
+            <label style="cursor: pointer;"><input type="checkbox" id="toggle-dashboard"> 📊 Dash View</label>
+        </div>
+
+        <div class="panel">
+            <button id="toggle-overlay-btn" style="padding: 5px 10px; font-size: 14px;">Overlay ON</button>
+            <label for="overlay-opacity" style="margin-left: 10px; font-size: 14px;">Opacity: <span id="opacity-label">20%</span></label>
+            <input type="range" id="overlay-opacity" min="0" max="1" step="0.05" value="0.2" style="width: 80px;">
+        </div>
+    </div>
+    
+    <div id="status">대기 중... .MV 파일을 선택하세요.</div>
+
+    <div id="dashboard">
+        <div class="dash-section">
+            <div class="dash-title">PALETTE MEMORY (16 COLORS)</div>
+            <div id="vis-palette"></div>
+        </div>
+        <div class="dash-section">
+            <div class="dash-title">STEREO EQ SPECTRUM (18 BANDS)</div>
+            <div id="vis-eq"></div>
+        </div>
+    </div>
+
+    <canvas id="export-canvas" width="256" height="192" style="display:none;"></canvas>
+
+<script>
+const { FFmpeg } = FFmpegWASM;
+const ffmpeg = new FFmpeg();
+
+class MSXMediaDemuxer {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        this.frames = [];
+        this.audioBuffer = null;
+        this.audioSource = null;
+        this.rawAudioBytes = null;
+        this.isPlaying = false;
+        this.startTime = 0;
+        this.pauseTime = 0;
+        this.animationId = null;
+        this.fps = 12; // MV1은 기본 12fps
+        this.initDashboard();
+    }
+
+    initDashboard() {
+        const palContainer = document.getElementById('vis-palette');
+        for (let i = 0; i < 16; i++) {
+            const d = document.createElement('div');
+            d.className = 'pal-box';
+            palContainer.appendChild(d);
+        }
+        const eqContainer = document.getElementById('vis-eq');
+        for (let i = 0; i < 19; i++) {
+            if(i === 9) {
+                const divider = document.createElement('div');
+                divider.className = 'eq-center-divider';
+                eqContainer.appendChild(divider);
+                continue;
+            }
+            const d = document.createElement('div');
+            d.className = 'eq-bar';
+            d.style.height = '0px';
+            eqContainer.appendChild(d);
+        }
+    }
+
+    reset() {
+        this.isPlaying = false;
+        cancelAnimationFrame(this.animationId);
+        if (this.audioSource) { try { this.audioSource.stop(); } catch (e) {} this.audioSource.disconnect(); this.audioSource = null; }
+        this.frames = [];
+        this.audioBuffer = null;
+        this.rawAudioBytes = null;
+        this.ctx.fillStyle = "black";
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        document.getElementById('btn-play').disabled = true;
+        document.getElementById('btn-pause').disabled = true;
+        document.getElementById('btn-export').disabled = true;
+    }
+
+    async loadFile(file) {
+        this.reset();
+        document.getElementById('status').innerText = "파일 분석 중...";
+        const data = new Uint8Array(await file.arrayBuffer());
+        const sig = String.fromCharCode(...data.slice(0, 8));
+        const ver = String.fromCharCode(...data.slice(16, 21));
+
+        try {
+            // 💡 [핵심] v1.00 포맷만 통과, v2.00일 경우 에러 발생
+            if (sig === "MMCSD_MV" && ver === "v1.00") {
+                this.fps = 12;
+                await this.parseMV1(data);
+            } else if (sig === "MMCSD_MV" && ver === "v2.00") {
+                throw new Error("V1.00 MV 파일만 지원합니다.");
+            } else { 
+                throw new Error("올바른 .MV 포맷이 아닙니다."); 
+            }
+            
+            document.getElementById('status').innerText = `파싱 완료! (${this.totalFrames} 프레임)`;
+            document.getElementById('status').style.color = "#4CAF50";
+            document.getElementById('btn-play').disabled = false;
+            document.getElementById('btn-export').disabled = false;
+        } catch (err) {
+            document.getElementById('status').innerText = `에러: ${err.message}`;
+            document.getElementById('status').style.color = "#ff4444";
+        }
+    }
+
+    async parseMV1(data) {
+        this.frames = [];
+        let offset = 16384; // 글로벌 헤더 패스
+        let pcmChunks = [];
+
+        while (offset + 16384 <= data.length) {
+            const block = data.subarray(offset, offset + 16384);
+            const pgt = block.slice(0, 6144);
+            const ct = block.slice(6144, 12288);
+            
+            // MV1 PCM 오디오 (944 바이트)
+            const pcm = block.slice(12288, 13232);
+            
+            // 15색 팔레트 + 0번 하드코딩 블랙
+            const palette = [[0,0,0]].concat(this.extractPalette(block.slice(13232, 13262), 15));
+            
+            // 💡 함장님이 찾아내신 완벽한 오프셋 적용 (13264번지)
+            const eqRaw = block.slice(13264, 13273);
+            
+            this.frames.push({ pgt, ct, palette, eqRaw });
+            pcmChunks.push(pcm);
+            offset += 16384;
+        }
+        this.totalFrames = this.frames.length;
+
+        // PCM 오디오를 FFmpeg Export용으로 결합 (순수 8비트 Unsigned PCM)
+        const totalLen = pcmChunks.length * 944;
+        this.rawAudioBytes = new Uint8Array(totalLen);
+        let aOff = 0;
+        for (let c of pcmChunks) { 
+            this.rawAudioBytes.set(c, aOff); 
+            aOff += c.length; 
+        }
+
+        // WebAudio API 재생용 버퍼 생성 (12fps * 944 = 11328Hz)
+        const sampleRate = 944 * 12;
+        this.audioBuffer = this.audioCtx.createBuffer(1, totalLen, sampleRate);
+        const channelData = this.audioBuffer.getChannelData(0);
+        for (let i = 0; i < totalLen; i++) {
+            channelData[i] = (this.rawAudioBytes[i] - 128) / 128.0;
+        }
+    }
+
+    extractPalette(d, count) {
+        const p = [];
+        for (let i = 0; i < count; i++) {
+            const r8 = Math.round(((d[i*2] >> 4) & 0x07) * 255/7);
+            const b8 = Math.round((d[i*2] & 0x07) * 255/7);
+            const g8 = Math.round((d[i*2+1] & 0x07) * 255/7);
+            p.push([r8, g8, b8]);
+        }
+        return p;
+    }
+
+    renderFrameToCanvas(frameIndex, targetCtx, withOverlay = false) {
+        const frame = this.frames[frameIndex];
+        const img = targetCtx.createImageData(256, 192);
+        for (let y = 0; y < 192; y++) {
+            for (let cx = 0; cx < 32; cx++) {
+                const off = (Math.floor(y/8)*32 + cx)*8 + (y%8);
+                const p = frame.pgt[off], c = frame.ct[off];
+                const fg = c >> 4, bg = c & 0x0F;
+                for (let px = 0; px < 8; px++) {
+                    const color = (p & (1 << (7-px))) ? frame.palette[fg] : frame.palette[bg];
+                    const idx = (y * 256 + (cx * 8 + px)) * 4;
+                    img.data[idx] = color[0]; img.data[idx+1] = color[1]; img.data[idx+2] = color[2]; img.data[idx+3] = 255;
+                }
+            }
+        }
+        targetCtx.putImageData(img, 0, 0);
+
+        if (withOverlay) {
+            const opacity = document.getElementById('overlay-opacity').value;
+            targetCtx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+            const eqWidth = 256 * 0.25;
+            const eqHeight = 192 * 0.25;
+            const barW = (eqWidth / 9) - 1;
+            for (let i = 0; i < 9; i++) {
+                const val = 15 - Math.min(frame.eqRaw[i], 15);
+                const h = (val / 15) * (eqHeight * 0.9);
+                targetCtx.fillRect(2 + i * (barW + 1), eqHeight - h + 2, barW, Math.max(1, h));
+            }
+        }
+    }
+
+    renderFrame(idx) {
+        this.renderFrameToCanvas(idx, this.ctx, false);
+        const frame = this.frames[idx];
+
+        if (document.getElementById('toggle-dashboard').checked) {
+            const palDivs = document.getElementById('vis-palette').children;
+            for(let i = 0; i < 16; i++) {
+                const rgb = frame.palette[i] || [0, 0, 0];
+                palDivs[i].style.backgroundColor = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+            }
+            
+            const eqDivs = document.getElementById('vis-eq').children;
+            for(let i = 0; i < 9; i++) {
+                const realVal = 15 - Math.min(frame.eqRaw[i], 15); 
+                const heightPx = (realVal / 15.0) * 60; 
+                eqDivs[i].style.height = `${heightPx}px`;
+                eqDivs[18 - i].style.height = `${heightPx}px`; 
+            }
+        }
+
+        const eqOverlay = document.getElementById('eq-overlay');
+        if (eqOverlay.style.display !== 'none') {
+            const bars = eqOverlay.children;
+            for(let i=0; i<9; i++) bars[i].style.height = `${((15 - Math.min(frame.eqRaw[i], 15))/15)*100}%`;
+        }
+    }
+
+    play() {
+        if (this.isPlaying) return;
+        if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
+        this.audioSource = this.audioCtx.createBufferSource();
+        this.audioSource.buffer = this.audioBuffer;
+        this.audioSource.connect(this.audioCtx.destination);
+        this.audioSource.start(0, this.pauseTime);
+        this.startTime = this.audioCtx.currentTime - this.pauseTime;
+        this.isPlaying = true;
+        document.getElementById('btn-play').disabled = true;
+        document.getElementById('btn-pause').disabled = false;
+        const loop = () => {
+            if (!this.isPlaying) return;
+            const currentFrame = Math.floor((this.audioCtx.currentTime - this.startTime) * this.fps);
+            if (currentFrame < this.totalFrames) { this.renderFrame(currentFrame); this.animationId = requestAnimationFrame(loop); }
+            else { this.pause(); }
+        };
+        loop();
+    }
+
+    pause() {
+        this.isPlaying = false;
+        if (this.audioSource) this.audioSource.stop();
+        this.pauseTime = this.audioCtx.currentTime - this.startTime;
+        cancelAnimationFrame(this.animationId);
+        document.getElementById('btn-play').disabled = false;
+        document.getElementById('btn-pause').disabled = true;
+    }
+
+    async exportMP4() {
+        const btn = document.getElementById('btn-export');
+        btn.disabled = true;
+        const status = document.getElementById('status');
+        status.innerText = "내보내기 준비 중...";
+        status.style.color = "#ffeb3b"; // 상태 알림 색상 변경
+
+        if (!ffmpeg.loaded) await ffmpeg.load({ coreURL: 'ffmpeg-core.js', wasmURL: 'ffmpeg-core.wasm' });
+
+        const exportCanvas = document.getElementById('export-canvas');
+        const exportCtx = exportCanvas.getContext('2d');
+        const videoData = new Uint8Array(this.totalFrames * 256 * 192 * 3);
+        let offset = 0;
+
+        // 비디오 프레임 추출
+        for (let i = 0; i < this.totalFrames; i++) {
+            this.renderFrameToCanvas(i, exportCtx, document.getElementById('eq-overlay').style.display !== 'none'); 
+            const pixels = exportCtx.getImageData(0, 0, 256, 192).data;
+            for (let j = 0; j < pixels.length; j += 4) {
+                videoData[offset++] = pixels[j]; videoData[offset++] = pixels[j+1]; videoData[offset++] = pixels[j+2];
+            }
+            if (i % 50 === 0) status.innerText = `프레임 합성 중... (${i}/${this.totalFrames})`;
+        }
+
+        // 💡 [핵심] MV1의 Unsigned 8-bit PCM 오디오를 처리하기 위한 FFmpeg 로직
+        await ffmpeg.writeFile('video.raw', videoData);
+        await ffmpeg.writeFile('audio.raw', this.rawAudioBytes); // raw PCM 파일 쓰기
+        
+        status.innerText = "MP4 인코딩 중...";
+        
+        // FFmpeg 명령어 최적화 (Raw PCM -> AAC 트랜스코딩 포함)
+        await ffmpeg.exec([
+            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '256x192', '-r', '12', '-i', 'video.raw', 
+            '-f', 'u8', '-ar', '11328', '-ac', '1', '-i', 'audio.raw', // 8비트 unsigned PCM 오디오 속성 선언
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 
+            '-c:a', 'aac', '-b:a', '128k', // 오디오를 AAC로 변환하여 MP4 컨테이너에 결합
+            '-shortest', 'output.mp4'
+        ]);
+
+        const data = await ffmpeg.readFile('output.mp4');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+        a.download = "msx_v1_export_result.mp4";
+        a.click();
+        
+        status.innerText = "내보내기 완료!";
+        status.style.color = "#4CAF50";
+        btn.disabled = false;
+    }
+}
+
+const player = new MSXMediaDemuxer('msx-screen');
+document.getElementById('file-input').addEventListener('change', e => player.loadFile(e.target.files[0]));
+document.getElementById('btn-play').addEventListener('click', () => player.play());
+document.getElementById('btn-pause').addEventListener('click', () => player.pause());
+document.getElementById('btn-export').addEventListener('click', () => player.exportMP4());
+
+document.getElementById('scale-slider').addEventListener('input', e => {
+    const s = e.target.value;
+    document.getElementById('scale-label').innerText = s + 'x';
+    const canvas = document.getElementById('msx-screen');
+    canvas.style.width = (256 * s) + 'px';
+    canvas.style.height = (192 * s) + 'px';
+});
+
+document.getElementById('toggle-dashboard').addEventListener('change', e => {
+    document.getElementById('dashboard').style.display = e.target.checked ? 'flex' : 'none';
+});
+
+document.getElementById('toggle-overlay-btn').addEventListener('click', e => {
+    const o = document.getElementById('eq-overlay');
+    const isOff = window.getComputedStyle(o).display === 'none';
+    
+    o.style.display = isOff ? 'flex' : 'none';
+    e.target.innerText = isOff ? 'Overlay OFF' : 'Overlay ON';
+    e.target.style.backgroundColor = isOff ? '#d9534f' : '#333';
+});
+
+document.getElementById('overlay-opacity').addEventListener('input', e => {
+    const alpha = e.target.value;
+    document.getElementById('opacity-label').innerText = Math.round(alpha * 100) + '%';
+    const bars = document.getElementsByClassName('overlay-eq-bar');
+    for(let b of bars) b.style.backgroundColor = `rgba(255, 255, 255, ${alpha})`;
+});
+</script>
+</body>
+</html>
