@@ -629,7 +629,7 @@ class MV2PerfectFrameEncoder:
                     
                     if self.use_avgen_color:
                         lvl = 182.0 if avg_lum > 127 else 73.0
-                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0], [lvl,0,0]])
+                        anchor_list.extend([[0,lvl,lvl], [lvl,lvl,0], [lvl,0,lvl], [lvl,0,0]])
                     else:
                         lvl = msx_levels[np.abs(msx_levels - avg_lum).argmin()]
                         if self.use_base_colors:
@@ -655,7 +655,7 @@ class MV2PerfectFrameEncoder:
                     
                     if self.use_avgen_color:
                         lvl = 182.0 if avg_lum > 127 else 73.0
-                        anchor_list.extend([[0,lvl,lvl], [lvl,0,lvl], [lvl,lvl,0], [lvl,0,0]])
+                        anchor_list.extend([[0,lvl,lvl], [lvl,lvl,0], [lvl,0,lvl], [lvl,0,0]])
                     else:
                         lvl = float(msx_levels[np.abs(msx_levels - avg_lum).argmin()])
                         if self.use_base_colors:
@@ -674,7 +674,7 @@ class MV2PerfectFrameEncoder:
                 raw = [(0,0,0)] * 15
                 self.prev_centroids = None
             else:
-                n_clusters = min(unique_colors, 15)
+                n_clusters = min(unique_colors, 16 if getattr(self, 'use_avgen_color', False) else 15)
                 
                 # ------ PRIME COLOR POOL INTERCEPT ------
                 if getattr(self, 'use_prime_color', False) and self.prime_pool is not None:
@@ -743,7 +743,10 @@ class MV2PerfectFrameEncoder:
                                 is_dup = True
                                 break
                         if not is_dup: filtered_raw.append(c)
-                    raw = [tuple(c) for c in anchor_list] + filtered_raw
+                    
+                    # 💡 Black(anchor_list[0])는 VRAM 0번 슬롯에 자동 매핑되므로 배열에서 생략하여 동적 슬롯 1개 확보!
+                    avgen_5colors = [tuple(c) for c in anchor_list[1:6]]
+                    raw = avgen_5colors + filtered_raw
 
             return raw, face_detected
 
@@ -878,9 +881,9 @@ class MV2PerfectFrameEncoder:
             final_pal_888 = final_pal_888[:15]
             
             if self.use_avgen_color:
-                # [AVGEN 모드] 0~5번은 고정색(흑,백,C,M,Y,R)으로 강제 못박기. 나머지 9색만 밝기로 정렬
-                fixed_part = final_pal_888[:6]
-                dynamic_part = final_pal_888[6:]
+                # [AVGEN 모드] 0번은 하드웨어 블랙. 1~5번 슬롯의 고정 5색(W,C,Y,M,R)만 밝기 정렬에서 보호
+                fixed_part = final_pal_888[:5]
+                dynamic_part = final_pal_888[5:]
                 dynamic_part.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
                 final_pal_888 = fixed_part + dynamic_part
             else:
