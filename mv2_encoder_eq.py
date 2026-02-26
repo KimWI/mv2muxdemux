@@ -154,7 +154,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, crop_up=0, crop_left=0):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, crop_up=0, crop_left=0):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -169,6 +169,7 @@ class MV2PerfectFrameEncoder:
         self.debug_frames = debug_frames 
         self.use_roi_face = use_roi_face 
         self.use_roi_center = use_roi_center
+        self.roi_center_spread = roi_center_spread
         self.crop_up = crop_up
         self.crop_left = crop_left
 
@@ -233,8 +234,8 @@ class MV2PerfectFrameEncoder:
                 center_y, center_x = h / 2, w / 2
                 
                 # 정규화된 2D 가우시안 마스크 (중앙 1.0, 외곽 0.0)
-                # 시그마 조정하여 집중도 변경 (w/3, h/3 정도면 화면 1/3을 강하게 잡음)
-                sigma_x, sigma_y = w / 3.0, h / 3.0
+                # 시그마 조정하여 집중도 변경 (사용자가 넘긴 스프레드 계수로 나누기)
+                sigma_x, sigma_y = w / self.roi_center_spread, h / self.roi_center_spread
                 gaussian_mask = np.exp(-(((x - center_x) ** 2) / (2 * sigma_x ** 2) + ((y - center_y) ** 2) / (2 * sigma_y ** 2)))
                 
                 # 강도 설정: 중앙은 최대 20배 가중치, 외곽은 기본값 + Alpha
@@ -485,6 +486,7 @@ if __name__ == "__main__":
     parser.add_argument("--scene-thresh", type=float, default=0.85, help="씬 전환 감지 임계값 (기본: 0.85 / 예민하게: 0.93)")
     parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
     parser.add_argument("--roi-center", action="store_true", help="화면 중앙부에 팔레트 색상을 집중 할당하는 2D 가우시안 ROI 패턴 적용 (KMeans 전용)")
+    parser.add_argument("--roi-center-spread", type=float, default=3.0, help="중앙 ROI 퍼짐 정도 (작을수록 화면 전체로 골고루 퍼짐, 기본값: 3.0 = 화면너비의 1/3 집중)")
     parser.add_argument("-ss", dest="start", default=None)
     parser.add_argument("-to", dest="end", default=None)
     parser.add_argument("--aspect", choices=['pad', 'crop', 'force'], default='pad')
@@ -512,6 +514,7 @@ if __name__ == "__main__":
         scene_thresh=args.scene_thresh,
         use_roi_face=args.roi_face,
         use_roi_center=args.roi_center,
+        roi_center_spread=args.roi_center_spread,
         crop_up=args.crop_up,
         crop_left=args.crop_left
     ).run()
