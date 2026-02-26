@@ -57,6 +57,23 @@
             max-height: 100vh;
         }
 
+        #video-container {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+            max-height: 55vh;
+        }
+
+        #screen-wrapper:fullscreen #video-container {
+            max-width: none;
+            max-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100vw;
+            height: 100vh;
+        }
+
         #eq-overlay {
             position: absolute;
             top: 0;
@@ -70,7 +87,7 @@
             justify-content: space-between;
             padding: 2%;
             box-sizing: border-box;
-            gap: 2px;
+            gap: 2%;
             z-index: 10;
         }
 
@@ -248,19 +265,21 @@
     <h2>MSX2 Universal Player & Recorder (.MV / .MV2)</h2>
 
     <div id="screen-wrapper">
-        <canvas id="msx-screen" width="256" height="192"></canvas>
-        <div id="eq-overlay">
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
-            <div class="overlay-eq-bar"></div>
+        <div id="video-container">
+            <canvas id="msx-screen" width="256" height="192"></canvas>
+            <div id="eq-overlay">
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+                <div class="overlay-eq-bar"></div>
+            </div>
         </div>
-        <button id="btn-fullscreen" disabled title="Fullscreen">⛶</button>
+        <button id="btn-fullscreen" disabled title="Fullscreen">⤡</button>
     </div>
 
     <div class="controls">
