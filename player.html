@@ -202,12 +202,44 @@
         }
 
         #btn-fullscreen {
-            background-color: #007bff;
-            font-weight: bold;
+            position: absolute;
+            bottom: 15px;
+            right: 15px;
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            background-color: rgba(0, 0, 0, 0.4);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            border-radius: 4px;
+            font-size: 16px;
+            font-family: monospace;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            cursor: pointer;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, background-color 0.2s, transform 0.1s, visibility 0.3s;
+        }
+
+        /* Show button when wrapper has the 'active' class (mouse moved / touched) */
+        #screen-wrapper.active #btn-fullscreen:not(:disabled) {
+            opacity: 1;
+            visibility: visible;
         }
 
         #btn-fullscreen:hover {
-            background-color: #0056b3;
+            background-color: rgba(0, 123, 255, 0.8);
+        }
+
+        #btn-fullscreen:active {
+            transform: scale(0.95);
+        }
+
+        #btn-fullscreen:disabled {
+            display: none;
         }
     </style>
 </head>
@@ -229,6 +261,7 @@
             <div class="overlay-eq-bar"></div>
             <div class="overlay-eq-bar"></div>
         </div>
+        <button id="btn-fullscreen" disabled title="Fullscreen">[ &nbsp; ]</button>
     </div>
 
     <div class="controls">
@@ -236,7 +269,6 @@
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
         <button id="btn-export" disabled>💾 Export MP4</button>
-        <button id="btn-fullscreen" disabled>⛶ Fullscreen</button>
 
         <div class="panel">
             <label for="scale-slider">📺 Size: <span id="scale-label">3x</span></label>
@@ -635,15 +667,34 @@
             for (let b of bars) b.style.backgroundColor = `rgba(255, 255, 255, ${alpha})`;
         });
 
+        // Autohide Fullscreen button logic
+        let hideBtnTimeout;
+        const screenWrapper = document.getElementById('screen-wrapper');
+
+        const showFullscreenBtn = () => {
+            screenWrapper.classList.add('active');
+            clearTimeout(hideBtnTimeout);
+            hideBtnTimeout = setTimeout(() => {
+                screenWrapper.classList.remove('active');
+            }, 2500);
+        };
+
+        screenWrapper.addEventListener('mousemove', showFullscreenBtn);
+        screenWrapper.addEventListener('touchstart', showFullscreenBtn);
+        screenWrapper.addEventListener('click', showFullscreenBtn);
+        screenWrapper.addEventListener('mouseleave', () => {
+            clearTimeout(hideBtnTimeout);
+            screenWrapper.classList.remove('active');
+        });
+
         document.getElementById('btn-fullscreen').addEventListener('click', () => {
-            const wrapper = document.getElementById('screen-wrapper');
             if (!document.fullscreenElement) {
-                if (wrapper.requestFullscreen) {
-                    wrapper.requestFullscreen();
-                } else if (wrapper.webkitRequestFullscreen) {
-                    wrapper.webkitRequestFullscreen();
-                } else if (wrapper.msRequestFullscreen) {
-                    wrapper.msRequestFullscreen();
+                if (screenWrapper.requestFullscreen) {
+                    screenWrapper.requestFullscreen();
+                } else if (screenWrapper.webkitRequestFullscreen) {
+                    screenWrapper.webkitRequestFullscreen();
+                } else if (screenWrapper.msRequestFullscreen) {
+                    screenWrapper.msRequestFullscreen();
                 }
             } else {
                 if (document.exitFullscreen) {
