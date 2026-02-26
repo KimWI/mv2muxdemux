@@ -126,16 +126,25 @@ def _kmeans_pytorch(data_tensor, n_clusters, init_centroids=None, n_init=10, max
             centroids = data_tensor[idx].clone()
             
         for _ in range(max_iter):
+            # Distance computation
             distances = torch.cdist(data_tensor, centroids)
             labels = torch.argmin(distances, dim=1)
             
-            new_centroids = torch.zeros_like(centroids)
-            for k in range(n_clusters):
-                mask = (labels == k)
-                if mask.sum() > 0:
-                    new_centroids[k] = data_tensor[mask].mean(dim=0)
-                else:
-                    new_centroids[k] = data_tensor[torch.randint(0, N, (1,))].squeeze(0)
+            # Vectorized Centroid Updates using scatter_add_
+            counts = torch.bincount(labels, minlength=n_clusters).float().unsqueeze(1)
+            X_sum = torch.zeros(n_clusters, D, device=device, dtype=torch.float32)
+            X_sum.scatter_add_(0, labels.unsqueeze(1).expand(-1, D), data_tensor)
+            
+            # Avoid division by zero
+            counts_clamped = torch.clamp(counts, min=1.0)
+            new_centroids = X_sum / counts_clamped
+            
+            # Handle empty clusters
+            empty_mask = (counts == 0.0).squeeze(1)
+            if empty_mask.any():
+                num_empty = empty_mask.sum().item()
+                random_idx = torch.randint(0, N, (num_empty,), device=device)
+                new_centroids[empty_mask] = data_tensor[random_idx]
                     
             if torch.norm(new_centroids - centroids) < tol:
                 centroids = new_centroids
