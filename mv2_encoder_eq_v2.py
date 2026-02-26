@@ -219,6 +219,78 @@ def _kmeans_pytorch_weighted(data_tensor, weights_tensor, n_clusters, init_centr
             
     return best_centroids.cpu().numpy()
 
+@njit(cache=True, fastmath=True)
+def extract_top2_colors_cpu(img, weight_mask):
+    h, w, _ = img.shape
+    num_blocks = h * (w // 8)
+    
+    out_colors = np.zeros((num_blocks * 2, 3), dtype=np.float32)
+    out_weights = np.zeros((num_blocks * 2,), dtype=np.float32)
+    out_idx = 0
+    
+    for y in range(h):
+        for cx in range(w // 8):
+            x_start = cx * 8
+            
+            u_colors = np.zeros((8, 3), dtype=np.uint8)
+            u_weights = np.zeros(8, dtype=np.float32)
+            u_cnt = 0
+            
+            for p in range(8):
+                x = x_start + p
+                r = img[y, x, 0]
+                g = img[y, x, 1]
+                b = img[y, x, 2]
+                w_val = np.float32(weight_mask[y, x])
+                
+                found = False
+                for i in range(u_cnt):
+                    if u_colors[i, 0] == r and u_colors[i, 1] == g and u_colors[i, 2] == b:
+                        u_weights[i] += w_val
+                        found = True
+                        break
+                
+                if not found:
+                    u_colors[u_cnt, 0] = r
+                    u_colors[u_cnt, 1] = g
+                    u_colors[u_cnt, 2] = b
+                    u_weights[u_cnt] = w_val
+                    u_cnt += 1
+            
+            if u_cnt == 1:
+                out_colors[out_idx, 0] = u_colors[0, 0]
+                out_colors[out_idx, 1] = u_colors[0, 1]
+                out_colors[out_idx, 2] = u_colors[0, 2]
+                out_weights[out_idx] = u_weights[0]
+                out_idx += 1
+            elif u_cnt > 1:
+                best_w1 = -1.0; best_i1 = -1
+                for i in range(u_cnt):
+                    if u_weights[i] > best_w1:
+                        best_w1 = u_weights[i]
+                        best_i1 = i
+                
+                best_w2 = -1.0; best_i2 = -1
+                for i in range(u_cnt):
+                    if i != best_i1 and u_weights[i] > best_w2:
+                        best_w2 = u_weights[i]
+                        best_i2 = i
+                
+                out_colors[out_idx, 0] = u_colors[best_i1, 0]
+                out_colors[out_idx, 1] = u_colors[best_i1, 1]
+                out_colors[out_idx, 2] = u_colors[best_i1, 2]
+                out_weights[out_idx] = u_weights[best_i1]
+                out_idx += 1
+                
+                if best_i2 != -1:
+                    out_colors[out_idx, 0] = u_colors[best_i2, 0]
+                    out_colors[out_idx, 1] = u_colors[best_i2, 1]
+                    out_colors[out_idx, 2] = u_colors[best_i2, 2]
+                    out_weights[out_idx] = u_weights[best_i2]
+                    out_idx += 1
+
+    return out_colors[:out_idx], out_weights[:out_idx]
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _encode_vram_optimal_search(img_rgb_float, pal_888):
     h, w = 192, 256
@@ -449,16 +521,18 @@ class MV2PerfectFrameEncoder:
                 # 기존 마스크(엣지나 얼굴)를 덮어쓰지 않고 가장 큰 가중치를 합산/초이스 
                 weight_mask = np.maximum(weight_mask, roi_center_weight)
 
-            # 4. 마스크(가중치)를 바탕으로 실제 픽셀 배열을 물리적으로 복제 (Numpy 매직)
-            flat_img = img_np.reshape(-1, 3)
-            flat_mask = weight_mask.reshape(-1)
-            weighted_pixels = np.repeat(flat_img, flat_mask, axis=0)
+            # 4. CPU/GPU 공통: 마스크를 기반으로 픽셀을 가장 밀도 높은 색상 탑2로 압축
+            if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+                data_points, weights = extract_top2_colors_gpu(img_np, weight_mask)
+            else:
+                data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
             
-            if len(weighted_pixels) > 300000:
-                np.random.shuffle(weighted_pixels)
-                weighted_pixels = weighted_pixels[:300000]
-            
-            unique_colors = len(np.unique(weighted_pixels, axis=0))
+            # 텐서/배열 내 유니크 컬러 확인
+            if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+                unique_colors = len(torch.unique(data_points, dim=0))
+            else:
+                unique_colors = len(np.unique(data_points, axis=0))
+                
             if unique_colors < 1:
                 raw = [(0,0,0)] * 15
                 self.prev_centroids = None
@@ -473,14 +547,15 @@ class MV2PerfectFrameEncoder:
                     n_init_val = 3 
                     
                 if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
-                    data_t, weights_t = extract_top2_colors_gpu(img_np, weight_mask)
                     init_c = np.array(self.prev_centroids) if (self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters) else None
-                    centers = _kmeans_pytorch_weighted(data_t, weights_t, n_clusters=n_clusters, init_centroids=init_c, n_init=3 if init_c is None else 1)
+                    centers = _kmeans_pytorch_weighted(data_points, weights, n_clusters=n_clusters, init_centroids=init_c, n_init=3 if init_c is None else 1)
                     raw = [tuple(c) for c in centers]
                 else:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=30).fit(weighted_pixels)
+                        # sklearn.cluster.KMeans에 가중치 매개변수를 직접 전달하여 처리!
+                        km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=30)
+                        km.fit(data_points, sample_weight=weights)
                         raw = [tuple(c) for c in km.cluster_centers_]
                         
                 self.prev_centroids = raw.copy() 
