@@ -4,6 +4,12 @@ from sklearn.cluster import KMeans
 from numba import njit, prange
 from PIL import Image
 
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
 # ==========================================================
 # 1. Numba JIT 고속 연산부
 # ==========================================================
@@ -115,6 +121,74 @@ def _encode_vram_optimal_search(img_rgb_float, pal_888):
             
             off = ((y // 8) * 32 + cx) * 8 + (y % 8)
             pgt[off] = p_byte; ct[off] = (best_fg << 4) | best_bg
+    return pgt, ct
+
+def _encode_vram_optimal_search_cuda(img_rgb_float, pal_888):
+    h, w = 192, 256
+    
+    # 텐서 복사 및 GPU 로드
+    img_t = torch.tensor(img_rgb_float, dtype=torch.float32, device='cuda')
+    img_t = torch.clamp(img_t, 0.0, 255.0)
+    pal_t = torch.tensor(pal_888, dtype=torch.float32, device='cuda')
+    
+    # 텐서를 (블록 개수=192*32, 픽셀 8개, 채널 3개)로 재배열
+    blocks = img_t.view(h, 32, 8, 3).reshape(-1, 8, 3)
+    num_blocks = blocks.shape[0]
+
+    # 각 픽셀과 팔레트 상의 15가지 색상(1번 인덱스부터) 사이의 제곱근 유클리드 거리 연산
+    # blocks: [B, 8, 1, 3] / pal_t[1:]: [1, 1, 15, 3] -> diff: [B, 8, 15, 3]
+    diff = blocks.unsqueeze(2) - pal_t[1:].unsqueeze(0).unsqueeze(0)
+    dist = (diff ** 2).sum(dim=-1) # [B, 8, 15] 
+
+    # 15개의 전경색(i)과 15개의 배경색(j) 간의 모든 조합 (총 225가지. i는 1~15, j는 1~i) 
+    # 하지만 연산의 단순화를 위해 i, j 1~15 전체 매트릭스를 구성하고 GPU 브로드캐스팅 
+    d_i = dist.unsqueeze(3) # [B, 8, 15, 1] - 전경색 거리 
+    d_j = dist.unsqueeze(2) # [B, 8, 1, 15] - 배경색 거리
+    
+    # 픽셀마다 d_i 가 작은지 d_j 가 작은지 취합.
+    min_dist = torch.minimum(d_i, d_j) # [B, 8, 15, 15]
+    
+    # 8픽셀 전체에 대한 에러 총합
+    block_err = min_dist.sum(dim=1) # [B, 15, 15]
+    
+    # j <= i 조건 (j가 i보다 큰 부분은 무한대 처리하여 배제)
+    mask = torch.tril(torch.ones(15, 15, dtype=torch.bool, device='cuda'))
+    block_err = torch.where(mask, block_err, torch.tensor(float('inf'), device='cuda'))
+    
+    # 각 블록(B)에서 가장 에러가 적은 (fg, bg) 인덱스 도출
+    flat_idx = block_err.view(num_blocks, -1).argmin(dim=1)
+    best_i = flat_idx // 15
+    best_j = flat_idx % 15
+    
+    # 각 조합에 따른 PGT 비트 계산
+    best_di = dist[torch.arange(num_blocks), :, best_i] # [B, 8]
+    best_dj = dist[torch.arange(num_blocks), :, best_j] # [B, 8]
+    
+    # d_i <= d_j 인 경우 비트 1로 설정 (전경색)
+    bit_mask = (best_di <= best_dj).int() # [B, 8]
+    
+    # 8개의 비트를 하나의 1바이트로 압축
+    shifts = torch.tensor([7, 6, 5, 4, 3, 2, 1, 0], dtype=torch.int32, device='cuda')
+    p_byte = (bit_mask << shifts.unsqueeze(0)).sum(dim=1).to(torch.uint8) # [B]
+    
+    # 실제 MSX 컬러코드 1-15는 인덱스 + 1
+    fg = (best_i + 1).to(torch.uint8)
+    bg = (best_j + 1).to(torch.uint8)
+    c_byte = (fg << 4) | bg # [B]
+    
+    # GPU 텐서를 다시 CPU 평면 배열로 복사하여 정렬하기 
+    p_byte_cpu = p_byte.view(192, 32).cpu().numpy()
+    c_byte_cpu = c_byte.view(192, 32).cpu().numpy()
+    
+    pgt = np.zeros(6144, dtype=np.uint8)
+    ct = np.zeros(6144, dtype=np.uint8)
+    
+    for y in range(h):
+        for cx in range(32):
+            off = ((y // 8) * 32 + cx) * 8 + (y % 8)
+            pgt[off] = p_byte_cpu[y, cx]
+            ct[off] = c_byte_cpu[y, cx]
+            
     return pgt, ct
 
 @njit(fastmath=True, cache=True)
@@ -412,7 +486,11 @@ class MV2PerfectFrameEncoder:
                 dither_flag = 2 if self.dither_mode == 'jjn' else (1 if self.dither_mode == 'fs' else 0)
                 img_rgb_diffused = _apply_dither_rgb(img_256, pal_888_np, dither_flag)
             
-            pgt, ct = _encode_vram_optimal_search(img_rgb_diffused, pal_888_np)
+            # 💡 [핵심] GPU 병렬 처리가 활성화 되어있는지 검사 후 PyTorch 분기, 그렇지 않으면 기존 Numba CPU로 분기
+            if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+                pgt, ct = _encode_vram_optimal_search_cuda(img_rgb_diffused, pal_888_np)
+            else:
+                pgt, ct = _encode_vram_optimal_search(img_rgb_diffused, pal_888_np)
 
             if self.debug_frames:
                 before_bgr = cv2.cvtColor(img_256, cv2.COLOR_RGB2BGR)
