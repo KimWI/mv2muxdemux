@@ -1,6 +1,7 @@
 import os, sys, math, subprocess, cv2, hashlib, warnings, argparse
 import numpy as np
 from sklearn.cluster import KMeans
+import tempfile
 from numba import njit, prange
 from PIL import Image
 
