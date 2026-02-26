@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>MSX2 MV1 Player & Recorder (v1.00 Only)</title>
+    <title>MSX2 Universal Player & Recorder (MV1/MV2 Supported)</title>
     <script src="coi-serviceworker.js"></script>
     <script src="ffmpeg.js"></script>
     <style>
@@ -33,7 +33,7 @@
 </head>
 <body>
 
-    <h2>MSX2 MV1 Player & Recorder (v1.00 Only)</h2>
+    <h2>MSX2 Universal Player & Recorder (.MV / .MV2)</h2>
     
     <div id="screen-wrapper">
         <canvas id="msx-screen" width="256" height="192"></canvas>
@@ -45,7 +45,7 @@
     </div>
     
     <div class="controls">
-        <input type="file" id="file-input" accept=".mv" />
+        <input type="file" id="file-input" accept=".mv,.mv2" />
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
         <button id="btn-export" disabled>💾 Export MP4</button>
@@ -66,7 +66,7 @@
         </div>
     </div>
     
-    <div id="status">대기 중... .MV 파일을 선택하세요.</div>
+    <div id="status">대기 중... .MV 또는 .MV2 파일을 선택하세요.</div>
 
     <div id="dashboard">
         <div class="dash-section">
@@ -98,7 +98,8 @@ class MSXMediaDemuxer {
         this.startTime = 0;
         this.pauseTime = 0;
         this.animationId = null;
-        this.fps = 12; // MV1은 기본 12fps
+        this.fps = 15;
+        this.isMV1 = false; // 💡 MP4 Export 분기용 포맷 플래그
         this.initDashboard();
     }
 
@@ -146,17 +147,24 @@ class MSXMediaDemuxer {
         const ver = String.fromCharCode(...data.slice(16, 21));
 
         try {
-            // 💡 [핵심] v1.00 포맷만 통과, v2.00일 경우 에러 발생
+            // 💡 [핵심] MV1과 MV2를 모두 에러 없이 통과!
             if (sig === "MMCSD_MV" && ver === "v1.00") {
                 this.fps = 12;
+                this.isMV1 = true;
                 await this.parseMV1(data);
             } else if (sig === "MMCSD_MV" && ver === "v2.00") {
-                throw new Error("V1.00 MV 파일만 지원합니다.");
+                this.fps = 15;
+                this.isMV1 = false;
+                await this.parseMV2(data, 16384);
+            } else if (sig.startsWith("MV2")) {
+                this.fps = 15;
+                this.isMV1 = false;
+                await this.parseMV2(data, 512); // Legacy MV2
             } else { 
-                throw new Error("올바른 .MV 포맷이 아닙니다."); 
+                throw new Error("올바른 .MV 또는 .MV2 포맷이 아닙니다."); 
             }
             
-            document.getElementById('status').innerText = `파싱 완료! (${this.totalFrames} 프레임)`;
+            document.getElementById('status').innerText = `파싱 완료! (${this.isMV1 ? 'MV1' : 'MV2'}, ${this.fps}FPS, ${this.totalFrames} 프레임)`;
             document.getElementById('status').style.color = "#4CAF50";
             document.getElementById('btn-play').disabled = false;
             document.getElementById('btn-export').disabled = false;
@@ -168,22 +176,16 @@ class MSXMediaDemuxer {
 
     async parseMV1(data) {
         this.frames = [];
-        let offset = 16384; // 글로벌 헤더 패스
+        let offset = 16384; 
         let pcmChunks = [];
 
         while (offset + 16384 <= data.length) {
             const block = data.subarray(offset, offset + 16384);
             const pgt = block.slice(0, 6144);
             const ct = block.slice(6144, 12288);
-            
-            // MV1 PCM 오디오 (944 바이트)
             const pcm = block.slice(12288, 13232);
-            
-            // 15색 팔레트 + 0번 하드코딩 블랙
             const palette = [[0,0,0]].concat(this.extractPalette(block.slice(13232, 13262), 15));
-            
-            // 💡 함장님이 찾아내신 완벽한 오프셋 적용 (13264번지)
-            const eqRaw = block.slice(13264, 13273);
+            const eqRaw = block.slice(13264, 13273); // 완벽한 13264번지 오프셋
             
             this.frames.push({ pgt, ct, palette, eqRaw });
             pcmChunks.push(pcm);
@@ -191,7 +193,6 @@ class MSXMediaDemuxer {
         }
         this.totalFrames = this.frames.length;
 
-        // PCM 오디오를 FFmpeg Export용으로 결합 (순수 8비트 Unsigned PCM)
         const totalLen = pcmChunks.length * 944;
         this.rawAudioBytes = new Uint8Array(totalLen);
         let aOff = 0;
@@ -200,13 +201,45 @@ class MSXMediaDemuxer {
             aOff += c.length; 
         }
 
-        // WebAudio API 재생용 버퍼 생성 (12fps * 944 = 11328Hz)
-        const sampleRate = 944 * 12;
+        const sampleRate = 944 * 12; // 11328Hz
         this.audioBuffer = this.audioCtx.createBuffer(1, totalLen, sampleRate);
         const channelData = this.audioBuffer.getChannelData(0);
         for (let i = 0; i < totalLen; i++) {
             channelData[i] = (this.rawAudioBytes[i] - 128) / 128.0;
         }
+    }
+
+    async parseMV2(data, headerSize) {
+        this.frames = [];
+        let offset = headerSize;
+        let mp3Chunks = [];
+
+        while (offset < data.length) {
+            const blockSize = (headerSize === 512 && offset === 512) ? 15872 : 16384; 
+            if (offset + blockSize > data.length) break;
+            
+            const block = data.subarray(offset, offset + blockSize);
+            const pgt = block.slice(0, 6144);
+            const ct = block.slice(6144, 12288);
+            const palette = [[0,0,0]].concat(this.extractPalette(block.slice(12288, 12318), 15));
+            const eqRaw = block.slice(12320, 12329); // MV2 고유의 12320번지 오프셋
+            const sz = block[12800];
+            const mp3 = block.slice(12801, 12801 + (sz * 32));
+            
+            this.frames.push({ pgt, ct, palette, eqRaw });
+            mp3Chunks.push(mp3);
+            offset += blockSize;
+        }
+        this.totalFrames = this.frames.length;
+
+        const totalLen = mp3Chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        this.rawAudioBytes = new Uint8Array(totalLen);
+        let aOff = 0;
+        for (let c of mp3Chunks) { 
+            this.rawAudioBytes.set(c, aOff); 
+            aOff += c.length; 
+        }
+        this.audioBuffer = await this.audioCtx.decodeAudioData(this.rawAudioBytes.buffer.slice(0));
     }
 
     extractPalette(d, count) {
@@ -312,7 +345,7 @@ class MSXMediaDemuxer {
         btn.disabled = true;
         const status = document.getElementById('status');
         status.innerText = "내보내기 준비 중...";
-        status.style.color = "#ffeb3b"; // 상태 알림 색상 변경
+        status.style.color = "#ffeb3b"; 
 
         if (!ffmpeg.loaded) await ffmpeg.load({ coreURL: 'ffmpeg-core.js', wasmURL: 'ffmpeg-core.wasm' });
 
@@ -321,7 +354,6 @@ class MSXMediaDemuxer {
         const videoData = new Uint8Array(this.totalFrames * 256 * 192 * 3);
         let offset = 0;
 
-        // 비디오 프레임 추출
         for (let i = 0; i < this.totalFrames; i++) {
             this.renderFrameToCanvas(i, exportCtx, document.getElementById('eq-overlay').style.display !== 'none'); 
             const pixels = exportCtx.getImageData(0, 0, 256, 192).data;
@@ -331,25 +363,38 @@ class MSXMediaDemuxer {
             if (i % 50 === 0) status.innerText = `프레임 합성 중... (${i}/${this.totalFrames})`;
         }
 
-        // 💡 [핵심] MV1의 Unsigned 8-bit PCM 오디오를 처리하기 위한 FFmpeg 로직
         await ffmpeg.writeFile('video.raw', videoData);
-        await ffmpeg.writeFile('audio.raw', this.rawAudioBytes); // raw PCM 파일 쓰기
         
-        status.innerText = "MP4 인코딩 중...";
+        let ffmpegArgs = [];
         
-        // FFmpeg 명령어 최적화 (Raw PCM -> AAC 트랜스코딩 포함)
-        await ffmpeg.exec([
-            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '256x192', '-r', '12', '-i', 'video.raw', 
-            '-f', 'u8', '-ar', '11328', '-ac', '1', '-i', 'audio.raw', // 8비트 unsigned PCM 오디오 속성 선언
-            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 
-            '-c:a', 'aac', '-b:a', '128k', // 오디오를 AAC로 변환하여 MP4 컨테이너에 결합
-            '-shortest', 'output.mp4'
-        ]);
+        // 💡 [핵심] MV1(PCM)과 MV2(MP3)를 완벽히 분기하여 FFmpeg 트랜스코딩 설정
+        if (this.isMV1) {
+            await ffmpeg.writeFile('audio.raw', this.rawAudioBytes);
+            ffmpegArgs = [
+                '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '256x192', '-r', '12', '-i', 'video.raw', 
+                '-f', 'u8', '-ar', '11328', '-ac', '1', '-i', 'audio.raw', 
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 
+                '-c:a', 'aac', '-b:a', '128k', 
+                '-shortest', 'output.mp4'
+            ];
+        } else {
+            await ffmpeg.writeFile('audio.mp3', this.rawAudioBytes);
+            ffmpegArgs = [
+                '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', '256x192', '-r', '15', '-i', 'video.raw', 
+                '-i', 'audio.mp3', 
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 
+                '-c:a', 'copy', // MP3는 그대로 복사 (빠르고 화질 열화 없음)
+                '-shortest', 'output.mp4'
+            ];
+        }
+
+        status.innerText = `MP4 인코딩 중... (${this.isMV1 ? 'PCM->AAC' : 'MP3 Copy'})`;
+        await ffmpeg.exec(ffmpegArgs);
 
         const data = await ffmpeg.readFile('output.mp4');
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
-        a.download = "msx_v1_export_result.mp4";
+        a.download = `msx_export_${this.isMV1 ? 'v1' : 'v2'}.mp4`;
         a.click();
         
         status.innerText = "내보내기 완료!";
