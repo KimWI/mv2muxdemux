@@ -433,7 +433,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False, keep_pre=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -456,6 +456,7 @@ class MV2PerfectFrameEncoder:
         self.crop_up = crop_up
         self.crop_left = crop_left
         self.use_cuda = use_cuda
+        self.keep_pre = keep_pre
 
         self.prev_hist = None
         self.prev_centroids = None
@@ -690,9 +691,15 @@ class MV2PerfectFrameEncoder:
                 vf_string = "scale=512:384:flags=lanczos"
                 
             input_args = ["-hwaccel", "cuda", "-i", self.input_video] if self.use_cuda else ["-i", self.input_video]
-            codec_args = ["-c:v", "h264_nvenc", "-preset", "p1"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
             
-            subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-an", "-vf", vf_string, "-r", "15"] + codec_args + ["-crf", "10", self.temp_vid], capture_output=True)
+            if self.keep_pre:
+                self.temp_vid = self.output_mv2 + ".pre.avi"
+                codec_args = ["-c:v", "rawvideo", "-pix_fmt", "bgr24", "-c:a", "copy"]
+                subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-vf", vf_string, "-r", "15"] + codec_args + [self.temp_vid], capture_output=True)
+            else:
+                self.temp_vid = next(tempfile._get_candidate_names()) + ".mp4"
+                codec_args = ["-c:v", "h264_nvenc", "-preset", "p1"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
+                subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-an", "-vf", vf_string, "-r", "15"] + codec_args + ["-crf", "10", self.temp_vid], capture_output=True)
             cap = cv2.VideoCapture(self.temp_vid)
             orig_fps = 15.0
         else:
@@ -815,7 +822,7 @@ class MV2PerfectFrameEncoder:
         out_f.close()
         
         if os.path.exists(self.temp_mp3): os.remove(self.temp_mp3)
-        if os.path.exists(self.temp_vid): os.remove(self.temp_vid)
+        if not self.keep_pre and os.path.exists(self.temp_vid): os.remove(self.temp_vid)
         if os.path.exists(self.temp_pcm): os.remove(self.temp_pcm) 
         print(f"[!] 공식 규격(16KB 헤더) 완벽 인코딩 완료: {self.output_mv2}")
 
@@ -845,6 +852,7 @@ if __name__ == "__main__":
     parser.add_argument("--crop-left", type=float, default=0, help="비디오 종횡비 패딩시 좌우 강제 이동 퍼센트 (-100:좌측 딱붙 ~ 100:우측 딱붙)")
     
     parser.add_argument("--debug-frame", "--debug-frames", dest="debug_frames", action="store_true", help="인코딩 전/후 프레임을 임시 폴더에 저장")
+    parser.add_argument("--keep-pre", action="store_true", help="[대용량 주의] 512x384 15fps 다운스케일된 중간 영상을 무압축(.avi)으로 원본 음성과 함께 보존합니다.")
     
     args = parser.parse_args()
     
@@ -869,5 +877,6 @@ if __name__ == "__main__":
         base_weight=args.base_weight,
         crop_up=args.crop_up,
         crop_left=args.crop_left,
-        use_cuda=args.cuda
+        use_cuda=args.cuda,
+        keep_pre=args.keep_pre
     ).run()
