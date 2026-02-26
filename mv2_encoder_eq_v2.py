@@ -199,6 +199,9 @@ def _kmeans_pytorch_weighted(data_tensor, weights_tensor, n_clusters, init_centr
             
             empty_mask = (counts == 0.0)
             if empty_mask.any():
+                # Temporal mode fast fail: if a cluster disappears during fine-tuning, just ignore and keep structure
+                if init_centroids is not None and max_iter < 10: break
+                
                 num_empty = empty_mask.sum().item()
                 probs = weights_tensor / weights_tensor.sum()
                 random_idx = torch.multinomial(probs, num_empty, replacement=False)
@@ -542,19 +545,21 @@ class MV2PerfectFrameEncoder:
                 if self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters:
                     init_val = np.array(self.prev_centroids)
                     n_init_val = 1 
+                    # 💡 시간적 추적 모드에서는 30번을 빙빙 돌 필요 없이 이전 프레임을 미세 조정만 하므로 루프 대폭 감소
+                    actual_max_iter = 5 
                 else:
                     init_val = 'k-means++'
                     n_init_val = 3 
+                    actual_max_iter = 30
                     
                 if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
                     init_c = np.array(self.prev_centroids) if (self.use_temporal and not is_scene_change and self.prev_centroids is not None and len(self.prev_centroids) == n_clusters) else None
-                    centers = _kmeans_pytorch_weighted(data_points, weights, n_clusters=n_clusters, init_centroids=init_c, n_init=3 if init_c is None else 1)
+                    centers = _kmeans_pytorch_weighted(data_points, weights, n_clusters=n_clusters, init_centroids=init_c, n_init=3 if init_c is None else 1, max_iter=actual_max_iter)
                     raw = [tuple(c) for c in centers]
                 else:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        # sklearn.cluster.KMeans에 가중치 매개변수를 직접 전달하여 처리!
-                        km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=30)
+                        km = KMeans(n_clusters=n_clusters, init=init_val, n_init=n_init_val, max_iter=actual_max_iter)
                         km.fit(data_points, sample_weight=weights)
                         raw = [tuple(c) for c in km.cluster_centers_]
                         
