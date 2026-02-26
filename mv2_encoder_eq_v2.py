@@ -433,7 +433,7 @@ def parse_time_str(t_str):
     except ValueError: return 0.0
 
 class MV2PerfectFrameEncoder:
-    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, crop_up=0, crop_left=0, use_cuda=False):
+    def __init__(self, input_video, output_mv2, quant_algo='kmeans', dither_mode='none', start_time=None, end_time=None, aspect_mode='pad', skip_prescale=False, use_temporal=False, debug_frames=False, scene_thresh=0.85, use_roi_face=False, use_roi_center=False, roi_center_spread=3.0, use_roi_diff=False, use_roi_flow=False, use_base_colors=False, base_weight=2000.0, crop_up=0, crop_left=0, use_cuda=False):
         self.input_video = input_video
         self.output_mv2 = output_mv2
         self.quant_algo = quant_algo.lower()
@@ -451,6 +451,8 @@ class MV2PerfectFrameEncoder:
         self.roi_center_spread = roi_center_spread
         self.use_roi_diff = use_roi_diff
         self.use_roi_flow = use_roi_flow
+        self.use_base_colors = use_base_colors
+        self.base_weight = float(base_weight)
         self.crop_up = crop_up
         self.crop_left = crop_left
         self.use_cuda = use_cuda
@@ -546,13 +548,25 @@ class MV2PerfectFrameEncoder:
             # 4. CPU/GPU 공통: 마스크를 기반으로 픽셀을 가장 밀도 높은 색상 탑2로 압축
             if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
                 data_points, weights = extract_top2_colors_gpu(img_np, weight_mask)
-            else:
-                data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
-            
-            # 텐서/배열 내 유니크 컬러 확인
-            if self.use_cuda and HAS_TORCH and torch.cuda.is_available():
+                
+                # 5. Base Color 강제 주입 (Soft Anchors)
+                if self.use_base_colors:
+                    fixed_c = torch.tensor([[0,0,0], [255,255,255], [0,255,255], [255,0,255], [255,255,0]], dtype=torch.float32, device='cuda')
+                    fixed_w = torch.full((5,), self.base_weight, dtype=torch.float32, device='cuda')
+                    data_points = torch.cat([fixed_c, data_points])
+                    weights = torch.cat([fixed_w, weights])
+                    
                 unique_colors = len(torch.unique(data_points, dim=0))
             else:
+                data_points, weights = extract_top2_colors_cpu(img_np, weight_mask)
+                
+                # 5. Base Color 강제 주입 (Soft Anchors)
+                if self.use_base_colors:
+                    fixed_c = np.array([[0,0,0], [255,255,255], [0,255,255], [255,0,255], [255,255,0]], dtype=np.float32)
+                    fixed_w = np.full((5,), self.base_weight, dtype=np.float32)
+                    data_points = np.vstack([fixed_c, data_points])
+                    weights = np.concatenate([fixed_w, weights])
+                    
                 unique_colors = len(np.unique(data_points, axis=0))
                 
             if unique_colors < 1:
@@ -809,6 +823,8 @@ if __name__ == "__main__":
     parser.add_argument("--roi-center-spread", type=float, default=3.0, help="중앙 ROI 퍼짐 정도 (작을수록 화면 전체로 골고루 퍼짐, 기본값: 3.0 = 화면너비의 1/3 집중)")
     parser.add_argument("--roi-diff", action="store_true", help="프레임 단위의 화면 움직임(단순 차분, 매우 빠름)을 포착하여 팔레트 우선순위 부여")
     parser.add_argument("--roi-flow", action="store_true", help="픽셀 단위의 광학 흐름(벡터 추적, 정밀함)을 포착하여 빠른 움직임에 높은 팔레트 우선순위 부여")
+    parser.add_argument("--base-colors", action="store_true", help="Black, White, Cyan, Magenta, Yellow 5원색을 강제로 팔레트에 삽입(Soft Anchor)하여 중간톤 뭉개짐 방지")
+    parser.add_argument("--base-weight", type=float, default=2000.0, help="Base Color들의 K-Means 가중치 록인(Lock-in) 강도 (기본: 2000.0)")
     parser.add_argument("--cuda", action="store_true", help="NVIDIA CUDA(NVENC/NVDEC)를 사용하여 FFmpeg 다운스케일 렌더링을 매우 가속화합니다.")
     parser.add_argument("-ss", dest="start", default=None)
     parser.add_argument("-to", dest="end", default=None)
@@ -840,6 +856,8 @@ if __name__ == "__main__":
         roi_center_spread=args.roi_center_spread,
         use_roi_diff=args.roi_diff,
         use_roi_flow=args.roi_flow,
+        use_base_colors=args.base_colors,
+        base_weight=args.base_weight,
         crop_up=args.crop_up,
         crop_left=args.crop_left,
         use_cuda=args.cuda
