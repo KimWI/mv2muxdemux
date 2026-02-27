@@ -258,6 +258,33 @@
         #btn-fullscreen:disabled {
             display: none;
         }
+
+        .drop-zone {
+            border: 2px dashed #555;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            background: #1a1a1a;
+            transition: all 0.3s ease;
+            margin: 20px auto;
+            width: 90%;
+            max-width: 600px;
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+
+        .drop-zone.dragover {
+            background: #2a2a35;
+            border-color: #4CAF50;
+            transform: scale(1.02);
+        }
+
+        .drop-zone p {
+            margin: 0 0 15px 0;
+            color: #ccc;
+            font-size: 15px;
+            pointer-events: none;
+        }
     </style>
 </head>
 
@@ -283,21 +310,21 @@
         <button id="btn-fullscreen" disabled title="Fullscreen">⤡</button>
     </div>
 
-    <div class="controls">
+    <div id="drop-zone" class="drop-zone">
+        <p>여기에 .MV 또는 .MV2 파일을 드래그 앤 드롭하거나 클릭해서 선택하세요.</p>
         <input type="file" id="file-input" accept=".mv,.mv2" />
+    </div>
+
+    <div class="controls">
         <button id="btn-play" disabled>▶ Play</button>
         <button id="btn-pause" disabled>⏸ Pause</button>
         <button id="btn-export" disabled>💾 Export MP4</button>
 
-        <div class="panel" style="width: 100%; max-width: 600px; display: flex; align-items: center; justify-content: space-between; padding: 10px 0;">
+        <div class="panel"
+            style="width: 100%; max-width: 600px; display: flex; align-items: center; justify-content: space-between; padding: 10px 0;">
             <span id="time-current" style="font-family: monospace;">00:00</span>
-            <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" style="flex-grow: 1; margin: 0 10px;" disabled>
-            <span id="time-total" style="font-family: monospace;">00:00</span>
-        </div>
-
-        <div class="panel" style="width: 100%; max-width: 600px; display: flex; align-items: center; justify-content: space-between; padding: 10px 0;">
-            <span id="time-current" style="font-family: monospace;">00:00</span>
-            <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" style="flex-grow: 1; margin: 0 10px;" disabled>
+            <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1"
+                style="flex-grow: 1; margin: 0 10px;" disabled>
             <span id="time-total" style="font-family: monospace;">00:00</span>
         </div>
 
@@ -311,7 +338,8 @@
         </div>
 
         <div class="panel">
-            <label style="cursor: pointer;" title="Allow playing when tab is in background"><input type="checkbox" id="toggle-bg-play" checked> 🔄 BG Play</label>
+            <label style="cursor: pointer;" title="Allow playing when tab is in background"><input type="checkbox"
+                    id="toggle-bg-play" checked> 🔄 BG Play</label>
         </div>
 
         <div class="panel">
@@ -380,18 +408,18 @@
                         }
                     };
                 `;
-                const blob = new Blob([workerCode], {type: 'application/javascript'});
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
                 this.timerWorker = new Worker(URL.createObjectURL(blob));
                 this.timerWorker.onmessage = () => {
                     if (!this.isPlaying || this.isScrubbing) return;
                     let currentTime = this.audioCtx.currentTime - this.startTime;
                     if (currentTime > this.duration) currentTime = this.duration;
-                    
+
                     const currentFrame = Math.floor(currentTime * this.fps);
-                    
+
                     if (!this.isScrubbing) {
                         const slider = document.getElementById('seek-slider');
-                        if(this.duration > 0) slider.value = (currentTime / this.duration) * 100;
+                        if (this.duration > 0) slider.value = (currentTime / this.duration) * 100;
                         document.getElementById('time-current').innerText = this.formatTime(currentTime);
                     }
 
@@ -480,7 +508,7 @@
                     document.getElementById('btn-play').disabled = false;
                     document.getElementById('btn-export').disabled = false;
                     document.getElementById('btn-fullscreen').disabled = false;
-                    
+
                     this.duration = this.totalFrames / this.fps;
                     document.getElementById('time-total').innerText = this.formatTime(this.duration);
                     document.getElementById('seek-slider').disabled = false;
@@ -721,7 +749,42 @@
         }
 
         const player = new MSXMediaDemuxer('msx-screen');
-        document.getElementById('file-input').addEventListener('change', e => player.loadFile(e.target.files[0]));
+
+        const fileInput = document.getElementById('file-input');
+        const dropZone = document.getElementById('drop-zone');
+
+        fileInput.addEventListener('change', e => {
+            if (e.target.files.length > 0) player.loadFile(e.target.files[0]);
+        });
+
+        dropZone.addEventListener('click', e => {
+            if (e.target !== fileInput) {
+                fileInput.click();
+            }
+        });
+
+        dropZone.addEventListener('dragover', e => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', e => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', e => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                player.loadFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        window.addEventListener('dragover', e => e.preventDefault());
+        window.addEventListener('drop', e => e.preventDefault());
+
         document.getElementById('btn-play').addEventListener('click', () => player.play());
         document.getElementById('btn-pause').addEventListener('click', () => player.pause());
         document.getElementById('btn-export').addEventListener('click', () => player.exportMP4());
@@ -739,7 +802,7 @@
             const pct = parseFloat(e.target.value) / 100;
             const targetTime = pct * player.duration;
             document.getElementById('time-current').innerText = player.formatTime(targetTime);
-            
+
             const targetFrame = Math.min(Math.floor(targetTime * player.fps), player.totalFrames - 1);
             player.renderFrame(targetFrame);
         });
@@ -749,7 +812,7 @@
             const pct = parseFloat(e.target.value) / 100;
             player.pauseTime = pct * player.duration;
             player.isScrubbing = false;
-            
+
             if (wasPlayingBeforeSeek) {
                 player.play();
             }
