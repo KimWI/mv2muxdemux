@@ -961,6 +961,7 @@ if __name__ == "__main__":
     parser.add_argument("--algo", choices=['kmeans', 'mediancut', 'octree'], default='kmeans', help="팔레트 양자화 알고리즘")
     parser.add_argument("--dither", choices=['none', 'fs', 'jjn', 'bayer', 'bayer8'], default='none', help="디더링 모드")
     parser.add_argument("--temporal", action="store_true", help="[추천] 씬 감지를 포함한 팔레트 시간적 일관성(깜빡임 방지) 활성화")
+    parser.add_argument("--speed-fps", type=float, default=15.0, help="영상의 재생 속도를 이 프레임 단위 기준으로 지정합니다. (예: 15=기본 속도 100%%, 30=2배 빠르게 200%%)")
     parser.add_argument("--scene-thresh", type=float, default=0.85, help="씬 전환 감지 임계값 (기본: 0.85 / 예민하게: 0.93)")
     parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
     parser.add_argument("--roi-center", action="store_true", help="화면 중앙부에 팔레트 색상을 집중 할당하는 2D 가우시안 ROI 패턴 적용 (KMeans 전용)")
@@ -978,8 +979,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip-prescale", action="store_true")
     
     # 여백 패스 및 크롭 위치 조절 파라미터 (-100 ~ 100 퍼센트 배열 스크롤)
-    parser.add_argument('--crop-left', type=float, default=0.0, help='좌측 치우침 비중 추가 (%% 단위, 0=정중앙, -50=왼쪽, 50=오른쪽)')
-    parser.add_argument('--crop-up', type=float, default=0.0, help='상하단 치우침 비중 추가 (%% 단위, 0=정중앙, -50=위쪽, 50=아래쪽)')
+    parser.add_argument('--crop-left', type=float, default=0.0, help='좌측 치우침 비중 추가 (퍼센트 단위, 0=정중앙, -50=왼쪽, 50=오른쪽)')
+    parser.add_argument('--crop-up', type=float, default=0.0, help='상하단 치우침 비중 추가 (퍼센트 단위, 0=정중앙, -50=위쪽, 50=아래쪽)')
     
     parser.add_argument("--debug-frame", "--debug-frames", dest="debug_frames", action="store_true", help="인코딩 전/후 프레임을 임시 폴더에 저장")
     parser.add_argument("--keep-pre", action="store_true", help="[대용량 주의] 512x384 15fps 다운스케일된 중간 영상을 무압축(.avi)으로 원본 음성과 함께 보존합니다.")
