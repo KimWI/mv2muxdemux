@@ -508,7 +508,7 @@ class MV2PerfectFrameEncoder:
         # 💡 [AVGEN 오리지널 에뮬레이션]
         # (0, 73, 146, 255) 4단계 명도(총 64색) 강제 스냅 후 최빈도 15색 추출
         if self.use_avgen_color:
-            grid = np.array([0, 73, 146, 255], dtype=np.uint8)
+            grid = np.array([0, 72, 145, 255], dtype=np.uint8)
             diffs = np.abs(img_np[..., np.newaxis] - grid)
             closest_idx = diffs.argmin(axis=-1)
             quant_img = grid[closest_idx]
@@ -520,10 +520,10 @@ class MV2PerfectFrameEncoder:
             sort_idx = np.argsort(-counts)
             top_packed = unique_packed[sort_idx]
             
-            # 💡 [AVGEN 오리지널 에뮬레이션 2단계: 0~5번 슬롯 강제 고정 및 씬 밝기별 스위칭]
+            # 💡 [AVGEN 오리지널 에뮬레이션 2단계: 1~5번 슬롯 강제 고정 및 씬 밝기별 스위칭]
             avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
-            # 평균 밝기가 60을 넘으면 Level 4(146), 어두우면 Level 2(73) 사용
-            lvl = 146 if avg_lum > 60 else 73
+            # 평균 밝기가 60을 넘으면 Level 4(145), 어두우면 Level 2(72) 사용
+            lvl = 145 if avg_lum > 60 else 72
             
             # 0번 슬롯의 Black은 내부적으로 항상 최적화 연산에 사용되도록 업데이트되었으므로
             # 출력 15슬롯(1~15)에는 포함하지 않고 다른 색상을 위해 비워둡니다.
@@ -624,7 +624,7 @@ class MV2PerfectFrameEncoder:
                 # 💡 [AVGEN COLOR + KMeans 대응] 
                 elif self.use_avgen_color:
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
-                    lvl = 146 if avg_lum > 60 else 73
+                    lvl = 145 if avg_lum > 60 else 72
                     anchor_list = [
                         [0, 0, 0],       # 0: Black (VRAM 슬롯 0, 투명)
                         [255, 255, 255], # 1: White
@@ -663,7 +663,7 @@ class MV2PerfectFrameEncoder:
                 # 💡 [AVGEN COLOR + KMeans 대응] 
                 elif self.use_avgen_color:
                     avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
-                    lvl = 146 if avg_lum > 60 else 73
+                    lvl = 145 if avg_lum > 60 else 72
                     anchor_list = [
                         [0, 0, 0],       # 0: Black (VRAM 슬롯 0, 투명)
                         [255, 255, 255], # 1: White
