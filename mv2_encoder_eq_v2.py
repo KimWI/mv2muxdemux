@@ -32,8 +32,8 @@ def _apply_dither_rgb(img_array, pal_888, mode):
             g = 255.0 if g > 255.0 else (0.0 if g < 0.0 else g)
             b = 255.0 if b > 255.0 else (0.0 if b < 0.0 else b)
             
-            min_d = 250000.0; best_i = 1
-            for p_i in range(1, 16):
+            min_d = 250000.0; best_i = 0
+            for p_i in range(16):
                 d = (r - pal_888[p_i,0])**2 + (g - pal_888[p_i,1])**2 + (b - pal_888[p_i,2])**2
                 if d < min_d: min_d, best_i = d, p_i
             
@@ -303,10 +303,10 @@ def _encode_vram_optimal_search(img_rgb_float, pal_888):
         for cx in range(32):
             x_start = cx * 8
             block_rgb = img_rgb_float[y, x_start : x_start + 8]
-            best_err = 1e12; best_fg = 1; best_bg = 1
+            best_err = 1e12; best_fg = 0; best_bg = 0
             
-            for i in range(1, 16):
-                for j in range(1, i + 1):
+            for i in range(16):
+                for j in range(i + 1):
                     err = 0.0
                     for p in range(8):
                         r, g, b = block_rgb[p]
@@ -342,29 +342,29 @@ def _encode_vram_optimal_search_cuda(img_rgb_float, pal_888):
     num_blocks = blocks.shape[0]
 
     # 각 픽셀과 팔레트 상의 15가지 색상(1번 인덱스부터) 사이의 제곱근 유클리드 거리 연산
-    # blocks: [B, 8, 1, 3] / pal_t[1:]: [1, 1, 15, 3] -> diff: [B, 8, 15, 3]
-    diff = blocks.unsqueeze(2) - pal_t[1:].unsqueeze(0).unsqueeze(0)
-    dist = (diff ** 2).sum(dim=-1) # [B, 8, 15] 
+    # blocks: [B, 8, 1, 3] / pal_t: [1, 1, 16, 3] -> diff: [B, 8, 16, 3]
+    diff = blocks.unsqueeze(2) - pal_t.unsqueeze(0).unsqueeze(0)
+    dist = (diff ** 2).sum(dim=-1) # [B, 8, 16] 
 
-    # 15개의 전경색(i)과 15개의 배경색(j) 간의 모든 조합 (총 225가지. i는 1~15, j는 1~i) 
-    # 하지만 연산의 단순화를 위해 i, j 1~15 전체 매트릭스를 구성하고 GPU 브로드캐스팅 
-    d_i = dist.unsqueeze(3) # [B, 8, 15, 1] - 전경색 거리 
-    d_j = dist.unsqueeze(2) # [B, 8, 1, 15] - 배경색 거리
+    # 16개의 전경색(i)과 16개의 배경색(j) 간의 모든 조합 (총 256가지. i는 0~15, j는 0~i) 
+    # 하지만 연산의 단순화를 위해 i, j 0~15 전체 매트릭스를 구성하고 GPU 브로드캐스팅 
+    d_i = dist.unsqueeze(3) # [B, 8, 16, 1] - 전경색 거리 
+    d_j = dist.unsqueeze(2) # [B, 8, 1, 16] - 배경색 거리
     
     # 픽셀마다 d_i 가 작은지 d_j 가 작은지 취합.
-    min_dist = torch.minimum(d_i, d_j) # [B, 8, 15, 15]
+    min_dist = torch.minimum(d_i, d_j) # [B, 8, 16, 16]
     
     # 8픽셀 전체에 대한 에러 총합
-    block_err = min_dist.sum(dim=1) # [B, 15, 15]
+    block_err = min_dist.sum(dim=1) # [B, 16, 16]
     
     # j <= i 조건 (j가 i보다 큰 부분은 무한대 처리하여 배제)
-    mask = torch.tril(torch.ones(15, 15, dtype=torch.bool, device='cuda'))
+    mask = torch.tril(torch.ones(16, 16, dtype=torch.bool, device='cuda'))
     block_err = torch.where(mask, block_err, torch.tensor(float('inf'), device='cuda'))
     
     # 각 블록(B)에서 가장 에러가 적은 (fg, bg) 인덱스 도출
     flat_idx = block_err.view(num_blocks, -1).argmin(dim=1)
-    best_i = flat_idx // 15
-    best_j = flat_idx % 15
+    best_i = flat_idx // 16
+    best_j = flat_idx % 16
     
     # 각 조합에 따른 PGT 비트 계산
     best_di = dist[torch.arange(num_blocks), :, best_i] # [B, 8]
@@ -377,9 +377,9 @@ def _encode_vram_optimal_search_cuda(img_rgb_float, pal_888):
     shifts = torch.tensor([7, 6, 5, 4, 3, 2, 1, 0], dtype=torch.int32, device='cuda')
     p_byte = (bit_mask << shifts.unsqueeze(0)).sum(dim=1).to(torch.uint8) # [B]
     
-    # 실제 MSX 컬러코드 1-15는 인덱스 + 1
-    fg = (best_i + 1).to(torch.uint8)
-    bg = (best_j + 1).to(torch.uint8)
+    # 실제 MSX 컬러코드 0-15는 실제 인덱스와 동일.
+    fg = best_i.to(torch.uint8)
+    bg = best_j.to(torch.uint8)
     c_byte = (fg << 4) | bg # [B]
     
     # GPU 텐서를 다시 CPU 평면 배열로 복사하여 정렬하기 
@@ -525,7 +525,8 @@ class MV2PerfectFrameEncoder:
             # 평균 밝기가 60을 넘으면 Level 4(146), 어두우면 Level 2(73) 사용
             lvl = 146 if avg_lum > 60 else 73
             
-            # 파이썬 인코더 로직상 0번(Black)은 여기서 제외하고 배출 (1~15번 슬롯 확보용)
+            # 0번 슬롯의 Black은 내부적으로 항상 최적화 연산에 사용되도록 업데이트되었으므로
+            # 출력 15슬롯(1~15)에는 포함하지 않고 다른 색상을 위해 비워둡니다.
             fixed_colors = [
                 (255, 255, 255), # 1: White
                 (0, lvl, lvl),   # 2: Cyan
@@ -619,6 +620,23 @@ class MV2PerfectFrameEncoder:
                     fixed_w = torch.full((len(anchor_list),), self.base_weight, dtype=torch.float32, device='cuda')
                     data_points = torch.cat([fixed_c, data_points])
                     weights = torch.cat([fixed_w, weights])
+                
+                # 💡 [AVGEN COLOR + KMeans 대응] 
+                elif self.use_avgen_color:
+                    avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
+                    lvl = 146 if avg_lum > 60 else 73
+                    anchor_list = [
+                        [0, 0, 0],       # 0: Black (VRAM 슬롯 0, 투명)
+                        [255, 255, 255], # 1: White
+                        [0, lvl, lvl],   # 2: Cyan
+                        [lvl, lvl, 0],   # 3: Yellow
+                        [lvl, 0, lvl],   # 4: Magenta
+                        [lvl, 0, 0]      # 5: Red
+                    ]
+                    fixed_c = torch.tensor(anchor_list, dtype=torch.float32, device='cuda')
+                    fixed_w = torch.full((len(anchor_list),), self.base_weight, dtype=torch.float32, device='cuda')
+                    data_points = torch.cat([fixed_c, data_points])
+                    weights = torch.cat([fixed_w, weights])
                     
                 unique_colors = len(torch.unique(data_points, dim=0))
             else:
@@ -642,6 +660,23 @@ class MV2PerfectFrameEncoder:
                     data_points = np.vstack([fixed_c, data_points])
                     weights = np.concatenate([fixed_w, weights])
                     
+                # 💡 [AVGEN COLOR + KMeans 대응] 
+                elif self.use_avgen_color:
+                    avg_lum = (img_np[:, :, 0] * 0.299 + img_np[:, :, 1] * 0.587 + img_np[:, :, 2] * 0.114).mean()
+                    lvl = 146 if avg_lum > 60 else 73
+                    anchor_list = [
+                        [0, 0, 0],       # 0: Black (VRAM 슬롯 0, 투명)
+                        [255, 255, 255], # 1: White
+                        [0, lvl, lvl],   # 2: Cyan
+                        [lvl, lvl, 0],   # 3: Yellow
+                        [lvl, 0, lvl],   # 4: Magenta
+                        [lvl, 0, 0]      # 5: Red
+                    ]
+                    fixed_c = np.array(anchor_list, dtype=np.float32)
+                    fixed_w = np.full((len(anchor_list),), self.base_weight, dtype=np.float32)
+                    data_points = np.vstack([fixed_c, data_points])
+                    weights = np.concatenate([fixed_w, weights])
+
                 unique_colors = len(np.unique(data_points, axis=0))
                 
             if unique_colors < 1:
@@ -685,7 +720,7 @@ class MV2PerfectFrameEncoder:
                                 break
                         if not is_dup: filtered_raw.append(c)
                     
-                    # 💡 Black(anchor_list[0])는 VRAM 0번 슬롯에 자동 매핑되므로 배열에서 생략하여 동적 슬롯 1개 확보!
+                    # 💡 Black(0번 슬롯)은 항상 고정 투명/검정으로 evaluated 되므로 동적 15색에서 제외해 1개의 추가 여유 슬롯을 확보합니다.
                     avgen_5colors = [tuple(c) for c in anchor_list[1:6]]
                     raw = avgen_5colors + filtered_raw
 
@@ -694,9 +729,12 @@ class MV2PerfectFrameEncoder:
         else:
             pil_img = Image.fromarray(img_np)
             method = Image.Quantize.MEDIANCUT if self.quant_algo == 'mediancut' else Image.Quantize.FASTOCTREE
-            quantized = pil_img.quantize(colors=n_colors, method=method)
+            # 💡 [핵심] KMeans가 아닌 알고리즘들도 VRAM 0번 슬롯(Black)을 비워두기 위해 15개만 추출하도록 강제
+            quantized = pil_img.quantize(colors=15, method=method)
             pal = quantized.getpalette()
             raw = [(pal[i], pal[i+1], pal[i+2]) for i in range(0, len(pal), 3)] if pal else []
+            # 15개까지만 자르기 (혹시 모를 오버플로우 대비)
+            raw = raw[:15]
             return raw, False
 
     # 💡 [핵심 수정 1] 10바이트 고정 반환 (크기 불일치 ValueError 완벽 차단)
@@ -779,7 +817,8 @@ class MV2PerfectFrameEncoder:
                 subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-vf", vf_string, "-r", "15"] + codec_args + [self.temp_vid], capture_output=True)
             else:
                 self.temp_vid = next(tempfile._get_candidate_names()) + ".mp4"
-                codec_args = ["-c:v", "h264_nvenc", "-preset", "p1"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
+                #codec_args = ["-c:v", "h264_nvenc", "-preset", "p1"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
+                codec_args = ["-c:v", "h264_nvenc"] if self.use_cuda else ["-c:v", "libx264", "-preset", "ultrafast"]
                 subprocess.run(["ffmpeg", "-y"] + time_args + input_args + ["-an", "-vf", vf_string, "-r", "15"] + codec_args + ["-crf", "10", self.temp_vid], capture_output=True)
             cap = cv2.VideoCapture(self.temp_vid)
             orig_fps = 15.0
@@ -819,6 +858,12 @@ class MV2PerfectFrameEncoder:
             
             if not self.use_avgen_color:
                 final_pal_888.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+            else:
+                # AVGEN Color 모드일 때: 하양~빨강 5개 기본색은 고정하고, 나머지 슬롯만 명도 정렬
+                base_colors = final_pal_888[:5]
+                dynamic_colors = final_pal_888[5:]
+                dynamic_colors.sort(key=lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+                final_pal_888 = base_colors + dynamic_colors
             
             pal_333 = [tuple(int(round((c/255.0)*7)) for c in rgb) for rgb in final_pal_888]
             pal_888_np = np.zeros((16, 3), dtype=np.int32)
@@ -916,6 +961,7 @@ if __name__ == "__main__":
     parser.add_argument("--algo", choices=['kmeans', 'mediancut', 'octree'], default='kmeans', help="팔레트 양자화 알고리즘")
     parser.add_argument("--dither", choices=['none', 'fs', 'jjn', 'bayer', 'bayer8'], default='none', help="디더링 모드")
     parser.add_argument("--temporal", action="store_true", help="[추천] 씬 감지를 포함한 팔레트 시간적 일관성(깜빡임 방지) 활성화")
+    parser.add_argument("--speed-fps", type=float, default=15.0, help="영상의 재생 속도를 이 프레임 단위 기준으로 지정합니다. (예: 15=기본 속도 100%%, 30=2배 빠르게 200%%)")
     parser.add_argument("--scene-thresh", type=float, default=0.85, help="씬 전환 감지 임계값 (기본: 0.85 / 예민하게: 0.93)")
     parser.add_argument("--roi-face", action="store_true", help="인물/캐릭터 얼굴에 팔레트 색상을 대거 할당 (KMeans 전용)")
     parser.add_argument("--roi-center", action="store_true", help="화면 중앙부에 팔레트 색상을 집중 할당하는 2D 가우시안 ROI 패턴 적용 (KMeans 전용)")
@@ -933,8 +979,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip-prescale", action="store_true")
     
     # 여백 패스 및 크롭 위치 조절 파라미터 (-100 ~ 100 퍼센트 배열 스크롤)
-    parser.add_argument("--crop-up", type=float, default=0, help="비디오 종횡비 패딩시 상하 강제 이동 퍼센트 (-100:상단 딱붙 ~ 100:하단 딱붙)")
-    parser.add_argument("--crop-left", type=float, default=0, help="비디오 종횡비 패딩시 좌우 강제 이동 퍼센트 (-100:좌측 딱붙 ~ 100:우측 딱붙)")
+    parser.add_argument('--crop-left', type=float, default=0.0, help='좌측 치우침 비중 추가 (퍼센트 단위, 0=정중앙, -50=왼쪽, 50=오른쪽)')
+    parser.add_argument('--crop-up', type=float, default=0.0, help='상하단 치우침 비중 추가 (퍼센트 단위, 0=정중앙, -50=위쪽, 50=아래쪽)')
     
     parser.add_argument("--debug-frame", "--debug-frames", dest="debug_frames", action="store_true", help="인코딩 전/후 프레임을 임시 폴더에 저장")
     parser.add_argument("--keep-pre", action="store_true", help="[대용량 주의] 512x384 15fps 다운스케일된 중간 영상을 무압축(.avi)으로 원본 음성과 함께 보존합니다.")
